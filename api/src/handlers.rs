@@ -8,6 +8,9 @@ use axum::{
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
+const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
+const ALLOWED_EXTENSIONS: &[&str] = &["pdf", "md", "markdown", "txt", "pptx", "ppt"];
+
 use crate::{
     db::{self, AppState, StoredDocument},
     parsers,
@@ -64,14 +67,30 @@ pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart
     let mut filename: Option<String> = None;
     let mut data: Option<Vec<u8>> = None;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name().map(|n| n == "file").unwrap_or(false) {
-            filename = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(bytes) => data = Some(bytes.to_vec()),
-                Err(e) => return Err(err(StatusCode::BAD_REQUEST, format!("read file: {}", e))),
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                if field.name().map(|n| n == "file").unwrap_or(false) {
+                    filename = field.file_name().map(|s| s.to_string());
+                    match field.bytes().await {
+                        Ok(bytes) => data = Some(bytes.to_vec()),
+                        Err(e) => {
+                            return Err(err(
+                                StatusCode::BAD_REQUEST,
+                                format!("read file: {}", e),
+                            ));
+                        }
+                    }
+                    break;
+                }
             }
-            break;
+            Ok(None) => break,
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("multipart parse error: {}", e),
+                ));
+            }
         }
     }
 
@@ -80,6 +99,21 @@ pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart
         Some(d) if !d.is_empty() => d,
         _ => return Err(err(StatusCode::BAD_REQUEST, "no file provided")),
     };
+
+    if data.len() > MAX_FILE_BYTES {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("file exceeds {} MB limit", MAX_FILE_BYTES / 1024 / 1024),
+        ));
+    }
+
+    let file_type = detect_file_type(&filename);
+    if !ALLOWED_EXTENSIONS.contains(&file_type.as_str()) {
+        return Err(err(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("unsupported file type: {}", file_type),
+        ));
+    }
 
     info!("Upload received: {} ({} bytes)", filename, data.len());
 
@@ -96,7 +130,6 @@ pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart
         return Ok(Json(db::to_document_info(&existing, pages)));
     }
 
-    let file_type = detect_file_type(&filename);
     let storage_key = format!("{}_{}", hash, sanitize_filename(&filename));
     let path = state.uploads_dir.join(&storage_key);
 

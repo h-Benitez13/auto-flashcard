@@ -30,9 +30,6 @@ pub fn parse_pdf(path: &Path) -> Result<DocumentInfo, String> {
         );
     }
 
-    // Optional side-effect: persist .md sidecar next to the PDF
-    write_md_sidecar(path, &md_text);
-
     let info = build_document_info(&md_text, &path.file_name().unwrap_or_default().to_string_lossy());
 
     eprintln!("[flashcards] Result: {} pages, {} chars", info.page_count, info.total_chars);
@@ -136,15 +133,6 @@ pub fn build_document_info(text: &str, filename: &str) -> DocumentInfo {
 // ---------------------------------------------------------------------------
 // Private helpers — extraction strategy chain
 // ---------------------------------------------------------------------------
-
-fn write_md_sidecar(pdf_path: &Path, md_text: &str) {
-    let mut md_path = PathBuf::from(pdf_path);
-    md_path.set_extension("md");
-    match fs::write(&md_path, md_text) {
-        Ok(()) => eprintln!("[flashcards] Wrote Markdown sidecar to {:?}", md_path),
-        Err(e) => eprintln!("[flashcards] Failed to write .md sidecar: {}", e),
-    }
-}
 
 fn extract_with_pdftotext(path: &Path) -> Result<String, String> {
     // Check if pdftotext (from poppler) is available
