@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flashcards Web Architecture</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    h1, h2 {
+      color: #38bdf8;
+      margin-top: 3rem;
+    }
+    h1 { margin-top: 0; }
+    .diagram {
+      background: #1e293b;
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Flashcards Web Architecture</h1>
+
+  <h2>1. High-level architecture</h2>
+  <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    Monica([Monica<br/>Browser])
+
+    subgraph Vercel
+        NextApp[Next.js App<br/>App Router]
+        NextAPI[Next.js API Routes<br/>Route Handlers]
+    end
+
+    subgraph BackendHost
+        RustAPI[Rust API Service]
+        Worker[Rust Worker]
+    end
+
+    Postgres[(PostgreSQL)]
+    ObjectStore[(Object Storage<br/>S3 / R2)]
+    Queue[(Message Queue<br/>SQS / Redis / BullMQ)]
+    LLM[Groq LLM API]
+
+    Monica -->|HTTPS| NextApp
+    NextApp -->|REST / Server Actions| NextAPI
+    NextAPI -->|proxy + auth| RustAPI
+
+    RustAPI -->|enqueue| Queue
+    Worker -->|dequeue| Queue
+
+    RustAPI -->|metadata & jobs| Postgres
+    Worker -->|pages / chunks / cards| Postgres
+
+    RustAPI -->|original files| ObjectStore
+    Worker -->|read original files| ObjectStore
+
+    Worker -->|generate cards| LLM
+</pre>
+  </div>
+
+  <h2>2. Data model</h2>
+  <div class="diagram">
+<pre class="mermaid">
+erDiagram
+    USER {
+        uuid id PK
+        string email
+        datetime created_at
+    }
+
+    DOCUMENT {
+        uuid id PK
+        uuid user_id FK
+        string filename
+        string file_type
+        int page_count
+        int total_chars
+        string file_hash
+        string storage_key
+        string status
+        datetime created_at
+    }
+
+    FILE {
+        uuid id PK
+        uuid document_id FK
+        string storage_key
+        string content_hash
+        int size_bytes
+    }
+
+    PAGE {
+        uuid id PK
+        uuid document_id FK
+        int page_num
+        text text
+        int char_offset
+    }
+
+    CHUNK {
+        uuid id PK
+        uuid document_id FK
+        string content_hash
+        text content
+        int token_count
+        int start_page
+        int end_page
+    }
+
+    GENERATION_JOB {
+        uuid id PK
+        uuid document_id FK
+        string status
+        int progress
+        int total
+        string error_message
+        string density
+        boolean use_llm
+    }
+
+    FLASHCARD {
+        uuid id PK
+        uuid document_id FK
+        uuid chunk_id FK
+        string question
+        text answer
+        string card_type
+        json source_ref
+        string[] tags
+    }
+
+    USER ||--o{ DOCUMENT : owns
+    DOCUMENT ||--|| FILE : has
+    DOCUMENT ||--o{ PAGE : contains
+    DOCUMENT ||--o{ CHUNK : contains
+    DOCUMENT ||--o{ GENERATION_JOB : tracks
+    CHUNK ||--o{ FLASHCARD : generates
+</pre>
+  </div>
+
+  <h2>3. Upload to generate sequence</h2>
+  <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant M as Monica Browser
+    participant N as Next.js API
+    participant R as Rust API
+    participant W as Rust Worker
+    participant DB as PostgreSQL
+    participant G as Groq
+
+    M->>N: POST /api/upload (multipart file)
+    N->>R: forward file + user context
+    R->>R: compute content hash
+    R->>R: store original file to Object Storage
+    R->>DB: insert Document + File records
+    R->>W: enqueue parse_job (via queue)
+    R-->>N: document_id, job_id
+    N-->>M: upload accepted
+
+    Note over M,N: Poll every 1-2s
+    loop Job polling
+        M->>N: GET /api/jobs/:id
+        N->>R: GET /jobs/:id
+        R->>DB: read job status
+        R-->>N: status, progress, total
+        N-->>M: render progress
+    end
+
+    W->>W: dequeue parse_job
+    W->>W: download file from Object Storage
+    W->>W: extract pages (PDF / PPTX)
+    W->>DB: insert Pages
+    W->>DB: set job status = parsed
+
+    M->>N: POST /api/documents/:id/generate (pages + density)
+    N->>R: forward request
+    R->>DB: read selected Pages
+    R->>R: build Chunks
+    R->>DB: insert Chunks
+    R->>W: enqueue generate_job per chunk
+    R-->>N: job_id
+    N-->>M: generation started
+
+    Note over M,N: Poll every 1-2s
+    loop Job polling
+        M->>N: GET /api/jobs/:id
+        N-->>M: progress
+    end
+
+    W->>W: dequeue generate_job
+    W->>G: call Groq with chunk + density
+    G-->>W: JSON cards
+    W->>W: grounding check
+    W->>DB: insert Flashcards
+    W->>DB: update job progress
+    Note over M: Cards appear on completion
+</pre>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+  </script>
+</body>
+</html>
