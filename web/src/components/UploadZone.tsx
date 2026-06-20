@@ -1,6 +1,10 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { Upload } from "lucide-react";
+
+import { Card } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 interface Props {
   onUpload: (file: File) => Promise<void>;
@@ -18,7 +22,7 @@ export default function UploadZone({ onUpload, uploading }: Props) {
   };
 
   return (
-    <div
+    <Card
       onClick={() => inputRef.current?.click()}
       onDragOver={(e) => {
         e.preventDefault();
@@ -30,23 +34,29 @@ export default function UploadZone({ onUpload, uploading }: Props) {
         setDrag(false);
         handleFiles(e.dataTransfer.files);
       }}
-      className={`cursor-pointer rounded-2xl border-2 border-dashed p-8 text-center transition ${
-        drag
-          ? "border-sky-500 bg-sky-50"
-          : "border-zinc-300 hover:border-zinc-400"
-      }`}
+      className={cn(
+        "cursor-pointer border-dashed p-10 text-center transition hover:border-primary/50 hover:bg-accent",
+        drag && "border-primary bg-accent"
+      )}
     >
       <input
         ref={inputRef}
         type="file"
         className="hidden"
-        accept=".pdf,.md,.txt"
+        accept=".pdf,.md,.txt,.pptx,.ppt"
         onChange={(e) => handleFiles(e.target.files)}
       />
-      <p className="text-lg font-medium">
-        {uploading ? "Uploading & parsing…" : "Drop a PDF or Markdown file here"}
-      </p>
-      <p className="text-sm text-zinc-500">or click to browse</p>
-    </div>
+      <div className="flex flex-col items-center gap-3">
+        <div className="rounded-full bg-primary/10 p-3">
+          <Upload className="size-6 text-primary" />
+        </div>
+        <p className="text-lg font-medium">
+          {uploading ? "Uploading & parsing…" : "Drop a file to upload"}
+        </p>
+        <p className="text-sm text-muted-foreground">
+          PDF, Markdown, or Text. Click to browse.
+        </p>
+      </div>
+    </Card>
   );
 }

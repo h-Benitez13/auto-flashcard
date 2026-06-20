@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -34,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/documents", get(handlers::list_documents))
         .route("/documents/:id", get(handlers::get_document))
         .route("/upload", post(handlers::upload))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(cors)
         .with_state(state);
 

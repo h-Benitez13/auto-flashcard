@@ -1,6 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { FileText } from "lucide-react";
+
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 
 interface Doc {
   id: string;
@@ -16,29 +20,38 @@ interface Props {
 
 export default function DocumentList({ docs }: Props) {
   if (docs.length === 0) {
-    return <p className="text-zinc-500">No documents yet.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        No documents yet. Upload one above.
+      </p>
+    );
   }
 
   return (
-    <ul className="space-y-3">
+    <div className="grid gap-4">
       {docs.map((doc) => (
-        <li key={doc.id}>
-          <Link
-            href={`/document/${doc.id}`}
-            className="block rounded-xl border p-4 transition hover:bg-zinc-50"
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-medium">{doc.filename}</span>
-              <span className="rounded-full bg-zinc-100 px-2 py-1 text-xs uppercase">
-                {doc.file_type}
-              </span>
-            </div>
-            <p className="mt-1 text-sm text-zinc-500">
-              {doc.page_count} pages · {doc.total_chars.toLocaleString()} chars
-            </p>
-          </Link>
-        </li>
+        <Link key={doc.id} href={`/document/${doc.id}`}>
+          <Card className="transition hover:bg-accent">
+            <CardContent className="flex items-center gap-4 p-4">
+              <div className="rounded-full bg-secondary p-2">
+                <FileText className="size-5 text-secondary-foreground" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="truncate font-medium">{doc.filename}</p>
+                  <Badge variant="secondary" className="uppercase">
+                    {doc.file_type}
+                  </Badge>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {doc.page_count} pages · {doc.total_chars.toLocaleString()}{" "}
+                  chars
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
       ))}
-    </ul>
+    </div>
   );
 }

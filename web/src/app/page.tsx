@@ -5,6 +5,14 @@ import { listDocuments, uploadFile } from "@/lib/api";
 import { DocumentInfo } from "@/lib/types";
 import DocumentList from "@/components/DocumentList";
 import UploadZone from "@/components/UploadZone";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
 
 export default function Home() {
   const [docs, setDocs] = useState<
@@ -42,17 +50,28 @@ export default function Home() {
   };
 
   return (
-    <main className="mx-auto max-w-3xl p-8">
-      <h1 className="mb-2 text-3xl font-bold">Flashcards</h1>
-      <p className="mb-8 text-zinc-600">
-        Upload PDFs or Markdown to get started.
-      </p>
-      <UploadZone onUpload={handleUpload} uploading={uploading} />
-      {error && <p className="mt-4 text-red-600">{error}</p>}
-      <section className="mt-12">
-        <h2 className="mb-4 text-xl font-semibold">Documents</h2>
-        <DocumentList docs={docs} />
-      </section>
+    <main className="mx-auto w-full max-w-3xl p-8">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-3xl">Flashcards</CardTitle>
+          <CardDescription>
+            Upload PDFs or Markdown files and generate study cards.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <UploadZone onUpload={handleUpload} uploading={uploading} />
+          {error && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+          <Separator />
+          <section>
+            <h2 className="mb-4 text-xl font-semibold">Documents</h2>
+            <DocumentList docs={docs} />
+          </section>
+        </CardContent>
+      </Card>
     </main>
   );
 }
