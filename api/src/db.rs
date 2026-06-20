@@ -1,0 +1,256 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use rusqlite::{params, Connection};
+
+use crate::models::{DocumentInfo, PageContent};
+
+pub struct AppState {
+    pub db_path: PathBuf,
+    pub uploads_dir: PathBuf,
+}
+
+impl AppState {
+    pub fn new(db_path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let db_path = db_path.as_ref().to_path_buf();
+        let uploads_dir = db_path
+            .parent()
+            .map(|p| p.join("uploads"))
+            .unwrap_or_else(|| PathBuf::from("uploads"));
+
+        std::fs::create_dir_all(&db_path.parent().unwrap_or(Path::new(".")))
+            .context("create data dir")?;
+        std::fs::create_dir_all(&uploads_dir).context("create uploads dir")?;
+
+        let conn = open_path(&db_path)?;
+        init_schema(&conn)?;
+
+        Ok(Self {
+            db_path,
+            uploads_dir,
+        })
+    }
+
+    pub fn open(&self) -> anyhow::Result<Connection> {
+        open_path(&self.db_path)
+    }
+}
+
+fn open_path(path: &Path) -> anyhow::Result<Connection> {
+    Connection::open(path).context("open sqlite")
+}
+
+pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            page_count INTEGER NOT NULL DEFAULT 0,
+            total_chars INTEGER NOT NULL DEFAULT 0,
+            file_hash TEXT NOT NULL UNIQUE,
+            storage_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS files (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id),
+            storage_key TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pages (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            page_num INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            char_offset INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pages_document ON pages(document_id);
+
+        CREATE TABLE IF NOT EXISTS chunks (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            content_hash TEXT NOT NULL,
+            content TEXT NOT NULL,
+            token_count INTEGER NOT NULL DEFAULT 0,
+            start_page INTEGER NOT NULL,
+            end_page INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS generation_jobs (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            density TEXT,
+            use_llm INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS flashcards (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            chunk_id TEXT REFERENCES chunks(id),
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            card_type TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            tags TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_flashcards_document ON flashcards(document_id);
+        "#,
+    )
+    .context("init schema")?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredDocument {
+    pub id: String,
+    pub filename: String,
+    pub file_type: String,
+    pub page_count: u32,
+    pub total_chars: usize,
+    pub file_hash: String,
+    pub storage_key: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+pub fn find_document_by_hash(conn: &Connection, hash: &str) -> anyhow::Result<Option<StoredDocument>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
+         FROM documents WHERE file_hash = ?1",
+    )?;
+    let mut rows = stmt.query(params![hash])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(map_document(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn find_document_by_id(conn: &Connection, id: &str) -> anyhow::Result<Option<StoredDocument>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
+         FROM documents WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(map_document(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn map_document(row: &rusqlite::Row) -> rusqlite::Result<StoredDocument> {
+    Ok(StoredDocument {
+        id: row.get(0)?,
+        filename: row.get(1)?,
+        file_type: row.get(2)?,
+        page_count: row.get(3)?,
+        total_chars: row.get(4)?,
+        file_hash: row.get(5)?,
+        storage_key: row.get(6)?,
+        status: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+pub fn list_documents(conn: &Connection) -> anyhow::Result<Vec<StoredDocument>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
+         FROM documents ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| map_document(row))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("collect documents")
+}
+
+pub fn get_pages(conn: &Connection, document_id: &str) -> anyhow::Result<Vec<PageContent>> {
+    let mut stmt = conn.prepare(
+        "SELECT page_num, text, char_offset FROM pages WHERE document_id = ?1 ORDER BY page_num",
+    )?;
+    let rows = stmt.query_map(params![document_id], |row| {
+        Ok(PageContent {
+            page_num: row.get(0)?,
+            text: row.get(1)?,
+            char_offset: row.get(2)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("collect pages")
+}
+
+pub fn insert_document(
+    conn: &mut Connection,
+    doc: &StoredDocument,
+    size_bytes: usize,
+    pages: &[PageContent],
+) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute(
+        "INSERT INTO documents (id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            doc.id,
+            doc.filename,
+            doc.file_type,
+            doc.page_count,
+            doc.total_chars,
+            doc.file_hash,
+            doc.storage_key,
+            doc.status,
+            doc.created_at,
+        ],
+    )
+    .context("insert document")?;
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO files (id, document_id, storage_key, content_hash, size_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![file_id, doc.id, doc.storage_key, doc.file_hash, size_bytes as i64],
+    )
+    .context("insert file")?;
+
+    for page in pages {
+        let page_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, document_id, page_num, text, char_offset)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                page_id,
+                doc.id,
+                page.page_num,
+                page.text,
+                page.char_offset as i64,
+            ],
+        )
+        .context("insert page")?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn to_document_info(doc: &StoredDocument, pages: Vec<PageContent>) -> DocumentInfo {
+    DocumentInfo {
+        id: doc.id.clone(),
+        filename: doc.filename.clone(),
+        file_type: doc.file_type.clone(),
+        page_count: doc.page_count,
+        total_chars: doc.total_chars,
+        pages,
+    }
+}
