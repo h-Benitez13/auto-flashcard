@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::{params, Connection};
+use sha2::Digest;
 
-use crate::models::{DocumentInfo, PageContent};
+
+use crate::models::{Chunk, DocumentInfo, Flashcard, PageContent};
 
 pub struct AppState {
     pub db_path: PathBuf,
@@ -24,6 +26,7 @@ impl AppState {
 
         let conn = open_path(&db_path)?;
         init_schema(&conn)?;
+        migrate(&conn)?;
 
         Ok(Self {
             db_path,
@@ -80,8 +83,12 @@ pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             content TEXT NOT NULL,
             token_count INTEGER NOT NULL DEFAULT 0,
             start_page INTEGER NOT NULL,
-            end_page INTEGER NOT NULL
+            end_page INTEGER NOT NULL,
+            start_char INTEGER NOT NULL DEFAULT 0,
+            end_char INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 
         CREATE TABLE IF NOT EXISTS generation_jobs (
             id TEXT PRIMARY KEY,
@@ -93,6 +100,8 @@ pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             density TEXT,
             use_llm INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE INDEX IF NOT EXISTS idx_jobs_document ON generation_jobs(document_id);
 
         CREATE TABLE IF NOT EXISTS flashcards (
             id TEXT PRIMARY KEY,
@@ -253,4 +262,204 @@ pub fn to_document_info(doc: &StoredDocument, pages: Vec<PageContent>) -> Docume
         total_chars: doc.total_chars,
         pages,
     }
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1) WHERE name = ?2")?;
+    let mut rows = stmt.query(params![table, column])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    if !has_column(conn, "chunks", "start_char")? {
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN start_char INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !has_column(conn, "chunks", "end_char")? {
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN end_char INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Chunks
+// ---------------------------------------------------------------------------
+
+pub fn insert_chunks(conn: &mut Connection, chunks: &[Chunk]) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    for chunk in chunks {
+        let content_hash = hex::encode(sha2::Sha256::digest(chunk.content.as_bytes()));
+        tx.execute(
+            "INSERT INTO chunks (id, document_id, content_hash, content, token_count, start_page, end_page, start_char, end_char)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                chunk.id,
+                chunk.document_id,
+                content_hash,
+                chunk.content,
+                chunk.token_count as i64,
+                chunk.start_page,
+                chunk.end_page,
+                chunk.start_char as i64,
+                chunk.end_char as i64,
+            ],
+        )
+        .context("insert chunk")?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Flashcards
+// ---------------------------------------------------------------------------
+
+pub fn insert_flashcards(conn: &mut Connection, cards: &[Flashcard]) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    for card in cards {
+        let source_ref = serde_json::to_string(&card.source_ref).context("serialize source_ref")?;
+        let tags = serde_json::to_string(&card.tags).context("serialize tags")?;
+        tx.execute(
+            "INSERT INTO flashcards (id, document_id, chunk_id, question, answer, card_type, source_ref, tags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                card.id,
+                card.document_id,
+                card.chunk_id,
+                card.question,
+                card.answer,
+                card.card_type,
+                source_ref,
+                tags,
+            ],
+        )
+        .context("insert flashcard")?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn get_flashcards(conn: &Connection, document_id: &str) -> anyhow::Result<Vec<Flashcard>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, document_id, chunk_id, question, answer, card_type, source_ref, tags
+         FROM flashcards WHERE document_id = ?1 ORDER BY id"
+    )?;
+    let rows = stmt.query_map(params![document_id], |row| {
+        let source_ref: String = row.get(6)?;
+        let tags: String = row.get(7)?;
+        Ok(Flashcard {
+            id: row.get(0)?,
+            document_id: row.get(1)?,
+            chunk_id: row.get(2)?,
+            question: row.get(3)?,
+            answer: row.get(4)?,
+            card_type: row.get(5)?,
+            source_ref: serde_json::from_str(&source_ref).unwrap_or(crate::models::SourceRef {
+                page_start: 0,
+                page_end: 0,
+                char_start: 0,
+                char_end: 0,
+                preview: String::new(),
+            }),
+            tags: serde_json::from_str(&tags).unwrap_or_default(),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("collect flashcards")
+}
+
+// ---------------------------------------------------------------------------
+// Generation jobs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredJob {
+    pub id: String,
+    pub document_id: String,
+    pub status: String,
+    pub progress: i64,
+    pub total: i64,
+    pub error_message: Option<String>,
+    pub density: Option<String>,
+    pub use_llm: bool,
+}
+
+pub fn create_job(
+    conn: &mut Connection,
+    document_id: &str,
+    total: usize,
+    density: &str,
+    use_llm: bool,
+) -> anyhow::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO generation_jobs (id, document_id, status, progress, total, density, use_llm)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            document_id,
+            "queued",
+            0,
+            total as i64,
+            density,
+            use_llm as i64,
+        ],
+    )?;
+    Ok(id)
+}
+
+pub fn get_job(conn: &Connection, job_id: &str) -> anyhow::Result<Option<StoredJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, document_id, status, progress, total, error_message, density, use_llm
+         FROM generation_jobs WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![job_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(StoredJob {
+            id: row.get(0)?,
+            document_id: row.get(1)?,
+            status: row.get(2)?,
+            progress: row.get(3)?,
+            total: row.get(4)?,
+            error_message: row.get(5)?,
+            density: row.get(6)?,
+            use_llm: row.get::<_, i64>(7)? != 0,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_job_progress(conn: &mut Connection, job_id: &str, progress: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE generation_jobs SET progress = ?1, status = ?2 WHERE id = ?3",
+        params![progress, "generating", job_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_job_status(
+    conn: &mut Connection,
+    job_id: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE generation_jobs SET status = ?1, error_message = ?2 WHERE id = ?3",
+        params![status, error_message, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_flashcards_for_document(conn: &mut Connection, document_id: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM flashcards WHERE document_id = ?1",
+        params![document_id],
+    )?;
+    Ok(())
 }

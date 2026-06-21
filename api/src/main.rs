@@ -6,8 +6,10 @@ use axum::Router;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod chunker;
 mod db;
 mod handlers;
+mod llm;
 mod md_parser;
 mod models;
 mod parsers;
@@ -34,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/documents", get(handlers::list_documents))
         .route("/documents/:id", get(handlers::get_document))
+        .route("/documents/:id/generate", post(handlers::generate_flashcards))
+        .route("/documents/:id/flashcards", get(handlers::get_document_flashcards))
+        .route("/jobs/:id", get(handlers::get_job))
         .route("/upload", post(handlers::upload))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(cors)

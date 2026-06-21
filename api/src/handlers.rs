@@ -11,8 +11,12 @@ use tracing::{error, info};
 const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const ALLOWED_EXTENSIONS: &[&str] = &["pdf", "md", "markdown", "txt", "pptx", "ppt"];
 
+use serde::Deserialize;
+
 use crate::{
+    chunker,
     db::{self, AppState, StoredDocument},
+    llm,
     parsers,
 };
 
@@ -193,4 +197,165 @@ fn detect_file_type(filename: &str) -> String {
 
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\'], "_")
+}
+
+// ---------------------------------------------------------------------------
+// Flashcard generation
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct GenerateRequest {
+    density: Option<String>,
+    page_numbers: Option<Vec<u32>>,
+}
+
+pub async fn generate_flashcards(
+    State(state): State<Arc<AppState>>,
+    Path(document_id): Path<String>,
+    Json(req): Json<GenerateRequest>,
+) -> impl IntoResponse {
+    let density = req.density.unwrap_or_else(|| "balanced".to_string());
+
+    let conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    let _doc = match db::find_document_by_id(&conn, &document_id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "document not found")),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    let mut pages = match db::get_pages(&conn, &document_id) {
+        Ok(p) => p,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    if let Some(selected) = req.page_numbers {
+        let selected: std::collections::HashSet<u32> = selected.into_iter().collect();
+        pages.retain(|p| selected.contains(&p.page_num));
+    }
+
+    if pages.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "no pages selected"));
+    }
+
+    let chunks = chunker::chunk_document(&document_id, &pages, 256);
+    if chunks.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "no chunks could be created"));
+    }
+
+    let total = chunks.len();
+    let use_llm = std::env::var("GROQ_API_KEY")
+        .map(|k| !k.is_empty())
+        .unwrap_or(false);
+
+    let mut conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+    if let Err(e) = db::insert_chunks(&mut conn, &chunks) {
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("insert chunks: {}", e)));
+    }
+
+    let job_id = match db::create_job(&mut conn, &document_id, total, &density, use_llm) {
+        Ok(id) => id,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("create job: {}", e))),
+    };
+
+    let state_for_task = Arc::clone(&state);
+    let state_for_failure = Arc::clone(&state);
+    let job_id_for_response = job_id.clone();
+    tokio::spawn(async move {
+        let result = generate_task(state_for_task, document_id, job_id.clone(), chunks, density).await;
+        if let Err(ref e) = result {
+            let msg = e.to_string();
+            let job_id2 = job_id.clone();
+            let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let mut conn = state_for_failure.open()?;
+                db::set_job_status(&mut conn, &job_id2, "failed", Some(&msg))?;
+                Ok(())
+            }).await;
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id_for_response,
+        "total_chunks": total,
+        "use_llm": use_llm,
+    })))
+}
+
+async fn generate_task(
+    state: Arc<AppState>,
+    document_id: String,
+    job_id: String,
+    chunks: Vec<crate::models::Chunk>,
+    density: String,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let key = std::env::var("GROQ_API_KEY").ok().filter(|k| !k.is_empty());
+    let key_ref = key.as_deref();
+
+    let mut all_cards = Vec::new();
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let cards = llm::generate_for_chunk(&client, key_ref, chunk, Some(&density))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        all_cards.extend(cards);
+
+        let progress = (idx + 1) as i64;
+        let job_id_clone = job_id.clone();
+        let state_for_progress = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut conn = state_for_progress.open()?;
+            db::update_job_progress(&mut conn, &job_id_clone, progress)?;
+            Ok(())
+        }).await??;
+    }
+
+    let state_for_insert = Arc::clone(&state);
+    let job_id_clone = job_id.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut conn = state_for_insert.open()?;
+        db::delete_flashcards_for_document(&mut conn, &document_id)?;
+        db::insert_flashcards(&mut conn, &all_cards)?;
+        db::set_job_status(&mut conn, &job_id_clone, "completed", None)?;
+        Ok(())
+    }).await??;
+
+    Ok(())
+}
+
+pub async fn get_job(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::get_job(&conn, &job_id) {
+        Ok(Some(job)) => Ok(Json(job)),
+        Ok(None) => Err(err(StatusCode::NOT_FOUND, "job not found")),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn get_document_flashcards(
+    State(state): State<Arc<AppState>>,
+    Path(document_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::get_flashcards(&conn, &document_id) {
+        Ok(cards) => Ok(Json(cards)),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
