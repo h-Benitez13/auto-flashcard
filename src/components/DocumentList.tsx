@@ -85,7 +85,8 @@ export default function DocumentList({ docs, cardCounts, onChanged }: Props) {
         const hasCards = cardCount > 0;
 
         return (
-          <Card key={doc.id} className="transition hover:bg-accent">
+          <Link key={doc.id} href={`/document/${doc.id}`} className="block">
+          <Card className="transition hover:bg-accent cursor-pointer">
             <CardContent className="flex items-center gap-4 p-4">
               <div className="rounded-full bg-secondary p-2">
                 <FileText className="size-5 text-secondary-foreground" />
@@ -178,6 +179,7 @@ export default function DocumentList({ docs, cardCounts, onChanged }: Props) {
               )}
             </CardContent>
           </Card>
+          </Link>
         );
       })}
     </div>
