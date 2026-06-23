@@ -1,3 +1,8 @@
+# fly.toml app configuration file generated for auto-flashcard-api on 2026-06-23T13:23:31-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
 app = 'auto-flashcard-api'
 primary_region = 'lax'
 
@@ -5,22 +10,27 @@ primary_region = 'lax'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '3001'
   DATABASE_PATH = '/data/app.db'
-
-[[services]]
-  internal_port = 3001
-  protocol = 'tcp'
-
-  [[services.ports]]
-    handlers = ['tls', 'http']
-    port = 443
-
-  [[services.ports]]
-    handlers = ['http']
-    port = 80
-    force_https = true
+  PORT = '3001'
 
 [[mounts]]
   source = 'auto_flashcard_data'
   destination = '/data'
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 3001
+
+  [[services.ports]]
+    port = 443
+    handlers = ['tls', 'http']
+
+  [[services.ports]]
+    port = 80
+    handlers = ['http']
+    force_https = true
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
