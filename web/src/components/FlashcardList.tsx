@@ -127,6 +127,16 @@ export default function FlashcardList({ cards }: Props) {
                 <div className="whitespace-pre-wrap text-xl leading-relaxed">
                   {card.answer}
                 </div>
+
+                {/* Source snippet footer - only visible on answer side */}
+                <div className="mt-6 border-t bg-slate-50 dark:bg-slate-900 -mx-6 px-6 py-4">
+                  <div className="text-xs font-medium text-muted-foreground mb-2">
+                    Source
+                  </div>
+                  <div className="font-mono text-xs text-muted-foreground leading-relaxed">
+                    {preview}
+                  </div>
+                </div>
               </>
             ) : (
               <>
@@ -136,16 +146,6 @@ export default function FlashcardList({ cards }: Props) {
                 </div>
               </>
             )}
-          </div>
-
-          {/* Source snippet footer */}
-          <div className="mt-6 border-t bg-slate-50 dark:bg-slate-900 -mx-6 px-6 py-4">
-            <div className="text-xs font-medium text-muted-foreground mb-2">
-              Source
-            </div>
-            <div className="font-mono text-xs text-muted-foreground leading-relaxed">
-              {preview}
-            </div>
           </div>
         </CardContent>
       </Card>
