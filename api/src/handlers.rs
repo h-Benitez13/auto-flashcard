@@ -330,9 +330,7 @@ pub async fn generate_flashcards(
     }
 
     let total = chunks.len();
-    let use_llm = std::env::var("GROQ_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
+    let use_llm = !llm::build_providers().is_empty();
 
     let mut conn = match state.open() {
         Ok(c) => c,
@@ -378,8 +376,7 @@ async fn generate_task(
     density: String,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let key = std::env::var("GROQ_API_KEY").ok().filter(|k| !k.is_empty());
-    let key_ref = key.as_deref();
+    let providers = llm::build_providers();
 
     let mut all_cards = Vec::new();
     let mut used_fallback = false;
@@ -388,24 +385,25 @@ async fn generate_task(
     for (idx, chunk) in chunks.iter().enumerate() {
         let cards = if llm_dead {
             tracing::info!(
-                "LLM disabled for chunk {} (daily limit), using rule-based",
+                "LLM disabled for chunk {} (all providers exhausted), using rule-based",
                 chunk.id
             );
             used_fallback = true;
             chunker::generate_flashcards(chunk, Some(&density))
         } else {
-            match llm::generate_for_chunk(&client, key_ref, chunk, Some(&density)).await {
+            match llm::generate_for_chunk(&client, &providers, chunk, Some(&density)).await {
                 Ok(cards) => cards,
                 Err(e) => {
                     let msg = e.to_string();
                     tracing::warn!(
-                        "LLM failed for chunk {} ({}), falling back to rule-based: {}",
+                        "All providers failed for chunk {} ({}), falling back to rule-based: {}",
                         chunk.id,
                         chunk.content.len(),
                         msg
                     );
                     used_fallback = true;
-                    if msg.contains("Daily rate limit") {
+                    // If every provider hit a daily limit, skip LLM for remaining chunks
+                    if msg.contains("Daily rate limit") || msg.contains("All providers failed") {
                         llm_dead = true;
                     }
                     chunker::generate_flashcards(chunk, Some(&density))
@@ -413,6 +411,12 @@ async fn generate_task(
             }
         };
         all_cards.extend(cards);
+
+        // Pace requests to stay under per-minute token quotas (Cerebras
+        // reasoning models are token-heavy and hit tokens-per-minute limits).
+        if !llm_dead && idx + 1 < chunks.len() {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        }
 
         let progress = (idx + 1) as i64;
         let job_id_clone = job_id.clone();
