@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listDocuments, uploadFile } from "@/lib/api";
+import { listDocuments, listTrash, uploadFile } from "@/lib/api";
 import { DocumentInfo } from "@/lib/types";
 import DocumentList from "@/components/DocumentList";
+import TrashList from "@/components/TrashList";
 import UploadZone from "@/components/UploadZone";
 import {
   Card,
@@ -13,20 +14,29 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Trash2, ChevronDown, ChevronRight } from "lucide-react";
+
+type DocSummary = Pick<
+  DocumentInfo,
+  "id" | "filename" | "file_type" | "page_count" | "total_chars"
+>;
 
 export default function Home() {
-  const [docs, setDocs] = useState<
-    Pick<
-      DocumentInfo,
-      "id" | "filename" | "file_type" | "page_count" | "total_chars"
-    >[]
-  >([]);
+  const [docs, setDocs] = useState<DocSummary[]>([]);
+  const [trash, setTrash] = useState<(DocSummary & { deleted_at?: string | null })[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
+  const [trashOpen, setTrashOpen] = useState(false);
 
   const load = async () => {
     try {
-      setDocs(await listDocuments());
+      const [active, trashed] = await Promise.all([
+        listDocuments(),
+        listTrash(),
+      ]);
+      setDocs(active);
+      setTrash(trashed);
     } catch {
       setError("Could not load documents");
     }
@@ -68,8 +78,30 @@ export default function Home() {
           <Separator />
           <section>
             <h2 className="mb-4 text-xl font-semibold">Documents</h2>
-            <DocumentList docs={docs} />
+            <DocumentList docs={docs} onChanged={load} />
           </section>
+
+          {trash.length > 0 && (
+            <>
+              <Separator />
+              <section>
+                <Button
+                  variant="ghost"
+                  onClick={() => setTrashOpen((v) => !v)}
+                  className="mb-2 px-2"
+                >
+                  {trashOpen ? (
+                    <ChevronDown className="mr-2 size-4" />
+                  ) : (
+                    <ChevronRight className="mr-2 size-4" />
+                  )}
+                  <Trash2 className="mr-2 size-4" />
+                  Trash ({trash.length})
+                </Button>
+                {trashOpen && <TrashList docs={trash} onChanged={load} />}
+              </section>
+            </>
+          )}
         </CardContent>
       </Card>
     </main>

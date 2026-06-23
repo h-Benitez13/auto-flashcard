@@ -66,3 +66,49 @@ export async function getFlashcards(id: string): Promise<Flashcard[]> {
   if (!res.ok) throw new Error("Failed to load flashcards");
   return res.json();
 }
+
+export async function renameDocument(
+  id: string,
+  filename: string
+): Promise<{ id: string; filename: string }> {
+  const res = await fetch(`${API_URL}/documents/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Rename failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteDocument(
+  id: string
+): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/documents/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Delete failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function restoreDocument(
+  id: string
+): Promise<{ restored: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/documents/${id}/restore`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Restore failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function listTrash(): Promise<DocumentSummary[]> {
+  const res = await fetch(`${API_URL}/trash`);
+  if (!res.ok) throw new Error("Failed to load trash");
+  return res.json();
+}
