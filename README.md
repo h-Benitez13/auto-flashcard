@@ -124,6 +124,100 @@ The frontend expects the API at `http://localhost:3001`. For production, set
 - See `docs/architecture.md` for the full architecture plan and data model.
 - Tests: `cd api && cargo test` (33 tests).
 
+## Deployment
+
+This app is split into two deployable units: the **Next.js frontend** (Vercel)
+and the **Rust backend** (Fly.io). They can live on different domains because
+the backend already allows cross-origin requests (`CorsLayer::permissive()`).
+
+> **Shared workspace**: everyone with the frontend URL shares the same SQLite
+> database and uploaded files on the backend. No per-user isolation yet.
+
+### 1. Backend — Fly.io
+
+The backend needs a **persistent volume** (SQLite DB + uploaded files) and an
+**always-on** process because flashcard generation runs in-process with polling.
+
+Prerequisites: [Fly CLI](https://fly.io/docs/hands-on/install-flyctl/) installed
+and logged in (`flyctl auth login`).
+
+```bash
+cd api
+
+# Launch the app (creates the app on Fly; you can say no to adding a db/postgres)
+flyctl launch --name auto-flashcard-api --region lax --no-deploy
+
+# Create a persistent volume for SQLite and uploads (1 GB is plenty to start)
+flyctl volumes create auto_flashcard_data --size 1 --region lax --app auto-flashcard-api
+
+# Set the LLM provider secrets. Use fresh keys from each provider dashboard.
+flyctl secrets set GROQ_API_KEY=your_groq_key_here \
+                   CEREBRAS_API_KEY=your_cerebras_key_here \
+                   OPENAI_API_KEY=your_openai_key_here \
+                   --app auto-flashcard-api
+
+# Deploy
+flyctl deploy
+```
+
+When it finishes, Fly gives you a public URL:
+```
+https://auto-flashcard-api.fly.dev
+```
+
+The provided `fly.toml` already sets:
+- `PORT=3001`
+- `DATABASE_PATH=/data/app.db`
+- a mount for the volume at `/data` (so `/data/app.db` and `/data/uploads`
+  both persist across redeploys)
+
+### 2. Frontend — Vercel
+
+1. Push this repo to GitHub if you haven't already.
+2. In Vercel, **Import Project** → select the repo.
+3. Set **Root Directory** to `web`.
+4. Add the environment variable:
+   ```
+   NEXT_PUBLIC_API_URL=https://auto-flashcard-api.fly.dev
+   ```
+   (`NEXT_PUBLIC_*` is inlined at build time, so you must redeploy after changing it.)
+5. Deploy.
+
+Vercel will give you a URL like:
+```
+https://auto-flashcard-xyz.vercel.app
+```
+
+That's the URL you share with Monica.
+
+### 3. Smoke test the live app
+
+1. Open the Vercel URL.
+2. Upload a PDF, Markdown, or PowerPoint file.
+3. Click **Generate flashcards**.
+4. Flip through cards with `Space`, navigate with `←` / `→`.
+
+If uploads fail with a size error, check that the backend logs show
+`DefaultBodyLimit::max(100 * 1024 * 1024)` and that Fly is not running behind
+a smaller proxy limit.
+
+### 4. Updating the live app
+
+```bash
+# Backend changes
+cd api && flyctl deploy
+
+# Frontend changes: commit, push, and Vercel auto-deploys.
+```
+
+### Security reminders
+
+- Rotate any LLM keys that were ever pasted in chat/log files and use the new
+  keys only as Fly secrets.
+- Do not commit `.env` files.
+- The deployed app has **no authentication**; anyone with the URL can upload and
+  see all documents. Keep the URL private or add a simple password gate later.
+
 ## Roadmap
 
 - ~~PowerPoint (.pptx) parsing~~ ✅ Done
@@ -132,5 +226,4 @@ The frontend expects the API at `http://localhost:3001`. For production, set
 - Export to Anki (.apkg), CSV, JSON, printable PDF
 - Page/section selection for targeted generation
 - Auth for Monica (simple password or magic-link cookie)
-- Deployment: frontend → Vercel, backend → Render/Railway/Fly
 - Message queue (Redis/SQS) for large-document processing
