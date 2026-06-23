@@ -50,8 +50,8 @@ auto-flashcard/
 
 - **Frontend**: Next.js 16 (App Router), Tailwind CSS v4, TypeScript, shadcn/ui.
 - **Backend**: Rust + Axum + SQLite (PostgreSQL/S3 later).
-- **Parsing**: Rust PDF/Markdown extraction ported from the native app.
-  PowerPoint support is planned.
+- **Parsing**: Rust PDF/Markdown/PowerPoint extraction ported from the native app.
+  Each PowerPoint slide becomes one page.
 - **LLM**: Multi-provider chain — Groq, Cerebras, OpenAI (all server-side,
   keys never sent to the browser).
 - **Progress**: polling (fits Vercel/serverless). Queue added later.
@@ -126,7 +126,7 @@ The frontend expects the API at `http://localhost:3001`. For production, set
 
 ## Roadmap
 
-- PowerPoint (.pptx) parsing
+- ~~PowerPoint (.pptx) parsing~~ ✅ Done
 - Flashcard editing, deletion, and manual creation
 - Study/quiz mode with self-scoring and spaced repetition
 - Export to Anki (.apkg), CSV, JSON, printable PDF
