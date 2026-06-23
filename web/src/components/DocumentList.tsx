@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { FileText, Pencil, Trash2, Check, X } from "lucide-react";
+import { FileText, Pencil, Trash2, Check, X, BookOpen } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -19,10 +19,11 @@ interface Doc {
 
 interface Props {
   docs: Doc[];
+  cardCounts: Record<string, number>;
   onChanged?: () => void;
 }
 
-export default function DocumentList({ docs, onChanged }: Props) {
+export default function DocumentList({ docs, cardCounts, onChanged }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -80,6 +81,8 @@ export default function DocumentList({ docs, onChanged }: Props) {
       {docs.map((doc) => {
         const isEditing = editingId === doc.id;
         const isBusy = busyId === doc.id;
+        const cardCount = cardCounts[doc.id] ?? 0;
+        const hasCards = cardCount > 0;
 
         return (
           <Card key={doc.id} className="transition hover:bg-accent">
@@ -119,22 +122,40 @@ export default function DocumentList({ docs, onChanged }: Props) {
                     </Button>
                   </div>
                 ) : (
-                  <Link href={`/document/${doc.id}`} className="block">
-                    <div className="flex items-center gap-2">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
                       <p className="truncate font-medium">{doc.filename}</p>
                       <Badge variant="secondary" className="uppercase">
                         {doc.file_type}
                       </Badge>
+                      {hasCards && (
+                        <Badge variant="outline" className="flex items-center gap-1">
+                          <BookOpen className="size-3" />
+                          {cardCount}
+                        </Badge>
+                      )}
                     </div>
                     <p className="text-sm text-muted-foreground">
                       {doc.page_count} pages ·{" "}
                       {doc.total_chars.toLocaleString()} chars
                     </p>
-                  </Link>
+                  </div>
                 )}
               </div>
               {!isEditing && (
                 <div className="flex items-center gap-1">
+                  {hasCards && (
+                    <Link href={`/document/${doc.id}`}>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        title="Review cards"
+                      >
+                        <BookOpen className="mr-2 size-4" />
+                        Review
+                      </Button>
+                    </Link>
+                  )}
                   <Button
                     size="icon"
                     variant="ghost"
