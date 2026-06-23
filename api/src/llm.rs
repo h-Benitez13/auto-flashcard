@@ -2,9 +2,6 @@ use crate::models::{Chunk, Flashcard, SourceRef};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-const GROQ_BASE: &str = "https://api.groq.com/openai/v1";
-const LLM_MODEL: &str = "llama-3.3-70b-versatile";
-
 const SYSTEM_PROMPT: &str = r#"You are a flashcard generator. Your ONLY job is to create question-answer pairs DIRECTLY from the provided source text.
 
 RULES:
@@ -35,6 +32,65 @@ const USER_PROMPT_TEMPLATE: &str = r#"SOURCE TEXT (pages {startPage}-{endPage}):
 
 Create up to {cardCount} flashcards from THIS SOURCE ONLY. Cover as many DISTINCT concepts, definitions, facts, processes, comparisons, and values as the text genuinely supports — without repeating, rephrasing, or padding. If the text only supports fewer solid cards, return fewer. Return a JSON array of cards."#;
 
+// ---------------------------------------------------------------------------
+// Provider chain — all providers use the OpenAI-compatible /chat/completions API
+// ---------------------------------------------------------------------------
+
+pub struct Provider {
+    pub name: &'static str,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+}
+
+/// Build the provider chain from env vars, in priority order.
+/// Providers without a key are skipped.
+/// Order: Groq (free) → Cerebras (free) → OpenAI (paid safety net).
+pub fn build_providers() -> Vec<Provider> {
+    let mut providers = Vec::new();
+
+    if let Some(key) = std::env::var("GROQ_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        providers.push(Provider {
+            name: "groq",
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            model: "llama-3.3-70b-versatile".to_string(),
+            api_key: key,
+        });
+    }
+
+    if let Some(key) = std::env::var("CEREBRAS_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        providers.push(Provider {
+            name: "cerebras",
+            base_url: "https://api.cerebras.ai/v1".to_string(),
+            model: "gpt-oss-120b".to_string(),
+            api_key: key,
+        });
+    }
+
+    if let Some(key) = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        providers.push(Provider {
+            name: "openai",
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            api_key: key,
+        });
+    }
+
+    providers
+}
+
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
@@ -62,7 +118,7 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ChatResponseMessage {
-    content: String,
+    content: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -95,7 +151,11 @@ fn compute_card_target(word_count: usize, multiplier: f64) -> u32 {
 }
 
 fn max_tokens_for(card_count: u32) -> u32 {
-    (card_count * 160 + 256).clamp(512, 8192)
+    // Reasoning models (Cerebras gpt-oss-120b, zai-glm-4.7) spend many tokens
+    // on internal reasoning before producing card output, so we use a generous
+    // budget. 16384 is safe for Groq llama-3.3-70b, OpenAI gpt-4o-mini, and
+    // Cerebras reasoning models.
+    ((card_count * 160 + 256) * 3).clamp(2048, 16384)
 }
 
 fn build_prompt(chunk: &Chunk, card_count: u32) -> String {
@@ -106,14 +166,17 @@ fn build_prompt(chunk: &Chunk, card_count: u32) -> String {
         .replace("{chunkText}", &chunk.content)
 }
 
-async fn call_llm(
+/// Call a single provider. Retries on per-minute 429s.
+/// Returns Err with "Daily rate limit" in the message if the wait exceeds 180s,
+/// so the caller can skip to the next provider in the chain.
+async fn call_provider(
     client: &Client,
-    key: &str,
+    provider: &Provider,
     prompt: String,
     max_tokens: u32,
 ) -> Result<String, String> {
     let request = ChatRequest {
-        model: LLM_MODEL.to_string(),
+        model: provider.model.clone(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -129,45 +192,71 @@ async fn call_llm(
         max_tokens,
     };
 
-    let url = format!("{}/chat/completions", GROQ_BASE);
+    let url = format!("{}/chat/completions", provider.base_url);
     let max_retries = 3;
 
     for attempt in 1..=max_retries {
         let resp = client
             .post(&url)
-            .bearer_auth(key)
+            .bearer_auth(&provider.api_key)
             .json(&request)
             .send()
             .await
-            .map_err(|e| format!("LLM request failed: {}", e))?;
+            .map_err(|e| format!("[{}] request failed: {}", provider.name, e))?;
 
         if resp.status().is_success() {
-            let chat = resp
-                .json::<ChatResponse>()
+            let body = resp
+                .text()
                 .await
-                .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+                .map_err(|e| format!("[{}] read body: {}", provider.name, e))?;
+            let chat: ChatResponse = serde_json::from_str(&body).map_err(|e| {
+                format!(
+                    "[{}] parse response: {} (body: {})",
+                    provider.name,
+                    e,
+                    &body[..body.len().min(300)]
+                )
+            })?;
             return chat
                 .choices
                 .into_iter()
                 .next()
-                .map(|c| c.message.content)
-                .ok_or_else(|| "LLM returned no choices".to_string());
+                .and_then(|c| c.message.content)
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "[{}] returned empty content (likely truncated by reasoning tokens)",
+                        provider.name
+                    )
+                });
         }
 
         if resp.status() == 429 && attempt < max_retries {
             let body = resp.text().await.unwrap_or_default();
-            let delay_secs = extract_retry_delay(&body).unwrap_or(3.0) + 0.5;
+
+            // Cerebras returns "token_quota_exceeded" for tokens-per-minute limits
+            // without a "try again in" delay — default to 60s for per-minute quotas.
+            let delay_secs = if body.contains("token_quota_exceeded")
+                || body.contains("too_many_tokens")
+                || body.contains("Tokens per minute")
+            {
+                60.0
+            } else {
+                extract_retry_delay(&body).unwrap_or(3.0) + 0.5
+            };
 
             if delay_secs > 180.0 {
                 return Err(format!(
-                    "Daily rate limit reached. The API asked us to wait {:.0}s (~{:.0} min).",
+                    "Daily rate limit reached on {}. Wait {:.0}s (~{:.0} min).",
+                    provider.name,
                     delay_secs,
                     delay_secs / 60.0
                 ));
             }
 
             tracing::warn!(
-                "429 Rate Limit hit (attempt {}/{}). Retrying in {:.1}s...",
+                "[{}] 429 Rate Limit (attempt {}/{}). Retrying in {:.1}s...",
+                provider.name,
                 attempt,
                 max_retries,
                 delay_secs
@@ -178,10 +267,10 @@ async fn call_llm(
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM API error {}: {}", status, body));
+        return Err(format!("[{}] API error {}: {}", provider.name, status, body));
     }
 
-    Err("LLM request failed after max retries".to_string())
+    Err(format!("[{}] request failed after max retries", provider.name))
 }
 
 fn extract_retry_delay(body: &str) -> Option<f32> {
@@ -208,40 +297,61 @@ fn extract_retry_delay(body: &str) -> Option<f32> {
     }
 }
 
+/// Try each provider in order. First success returns cards.
+/// Daily-limit errors skip to the next provider immediately.
+/// Returns Err only if all providers fail.
 pub async fn generate_for_chunk(
     client: &Client,
-    key: Option<&str>,
+    providers: &[Provider],
     chunk: &Chunk,
     density: Option<&str>,
 ) -> Result<Vec<Flashcard>, String> {
     let density = density.unwrap_or("balanced");
 
-    if key.is_none() {
+    if providers.is_empty() {
         return Ok(crate::chunker::generate_flashcards(chunk, Some(density)));
     }
 
-    let key = key.unwrap();
     let multiplier = density_multiplier(density);
     let target = compute_card_target(count_words(&chunk.content), multiplier);
+    let prompt = build_prompt(chunk, target);
+    let max_tokens = max_tokens_for(target);
 
-    tracing::info!(
-        "LLM generating up to {} cards for chunk {} ({} chars)",
-        target,
-        chunk.id,
-        chunk.content.len()
-    );
+    let mut last_err = String::new();
 
-    let content = call_llm(
-        client,
-        key,
-        build_prompt(chunk, target),
-        max_tokens_for(target),
-    )
-    .await?;
+    for provider in providers {
+        tracing::info!(
+            "[{}] generating up to {} cards for chunk {} ({} chars)",
+            provider.name,
+            target,
+            chunk.id,
+            chunk.content.len()
+        );
 
-    let cards = parse_llm_response(&content, chunk);
-    tracing::info!("Generated {} cards for chunk {}", cards.len(), chunk.id);
-    Ok(cards)
+        match call_provider(client, provider, prompt.clone(), max_tokens).await {
+            Ok(content) => {
+                let cards = parse_llm_response(&content, chunk);
+                tracing::info!(
+                    "[{}] generated {} cards for chunk {}",
+                    provider.name,
+                    cards.len(),
+                    chunk.id
+                );
+                return Ok(cards);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[{}] failed for chunk {}: {} — trying next provider",
+                    provider.name,
+                    chunk.id,
+                    e
+                );
+                last_err = e;
+            }
+        }
+    }
+
+    Err(format!("All providers failed. Last error: {}", last_err))
 }
 
 fn parse_llm_response(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
@@ -401,7 +511,56 @@ mod tests {
 
     #[test]
     fn max_tokens_stays_in_bounds() {
-        assert!(max_tokens_for(MIN_CARDS) >= 512);
-        assert!(max_tokens_for(MAX_CARDS) <= 8192);
+        assert!(max_tokens_for(MIN_CARDS) >= 2048);
+        assert!(max_tokens_for(MAX_CARDS) <= 16384);
+    }
+
+    #[test]
+    fn build_providers_includes_all_when_keys_set() {
+        std::env::set_var("GROQ_API_KEY", "test-groq");
+        std::env::set_var("CEREBRAS_API_KEY", "test-cerebras");
+        std::env::set_var("OPENAI_API_KEY", "test-openai");
+
+        let providers = build_providers();
+        assert_eq!(providers.len(), 3);
+        assert_eq!(providers[0].name, "groq");
+        assert_eq!(providers[1].name, "cerebras");
+        assert_eq!(providers[2].name, "openai");
+
+        std::env::remove_var("GROQ_API_KEY");
+        std::env::remove_var("CEREBRAS_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn build_providers_skips_empty_keys() {
+        std::env::set_var("GROQ_API_KEY", "test-groq");
+        std::env::set_var("CEREBRAS_API_KEY", "");
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let providers = build_providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "groq");
+
+        std::env::remove_var("GROQ_API_KEY");
+    }
+
+    #[test]
+    fn build_providers_empty_when_no_keys() {
+        std::env::remove_var("GROQ_API_KEY");
+        std::env::remove_var("CEREBRAS_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let providers = build_providers();
+        assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn build_providers_trims_whitespace() {
+        std::env::set_var("GROQ_API_KEY", "  spaced-key  ");
+        let providers = build_providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].api_key, "spaced-key");
+        std::env::remove_var("GROQ_API_KEY");
     }
 }
