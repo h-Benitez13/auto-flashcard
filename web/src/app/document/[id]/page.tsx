@@ -101,12 +101,14 @@ export default function DocumentPage() {
           </div>
           <div>
             <CardTitle className="text-2xl">{doc.filename}</CardTitle>
-            <CardDescription>
-              <Badge variant="secondary" className="mr-2 uppercase">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Badge variant="secondary" className="uppercase">
                 {doc.file_type}
               </Badge>
-              {doc.page_count} pages · {doc.total_chars.toLocaleString()} chars
-            </CardDescription>
+              <span>
+                {doc.page_count} pages · {doc.total_chars.toLocaleString()} chars
+              </span>
+            </div>
           </div>
         </CardHeader>
       </Card>
