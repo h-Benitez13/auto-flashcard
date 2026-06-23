@@ -43,14 +43,16 @@ export default function DocumentPage() {
       .finally(() => setLoading(false));
   }, [id]);
 
+  const isDone = job && (job.status === "completed" || job.status === "completed_fallback");
+
   useEffect(() => {
-    if (!job || job.status === "completed" || job.status === "failed") return;
+    if (!job || isDone || job.status === "failed") return;
 
     const interval = setInterval(async () => {
       try {
         const updated = await getJob(job.id);
         setJob(updated);
-        if (updated.status === "completed") {
+        if (updated.status === "completed" || updated.status === "completed_fallback") {
           const fresh = await getFlashcards(id);
           setCards(fresh);
         }
@@ -60,7 +62,7 @@ export default function DocumentPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [job, id]);
+  }, [job, id, isDone]);
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -164,6 +166,13 @@ export default function DocumentPage() {
           {job?.status === "failed" && (
             <p className="text-sm text-destructive">
               Generation failed: {job.error_message}
+            </p>
+          )}
+
+          {job?.status === "completed_fallback" && (
+            <p className="text-sm text-amber-600 dark:text-amber-400">
+              {job.error_message ||
+                "Some cards used rule-based fallback (LLM rate-limited). You can regenerate later for higher-quality cards."}
             </p>
           )}
         </CardContent>
