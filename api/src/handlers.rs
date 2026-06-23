@@ -19,7 +19,6 @@ use crate::{
     llm,
     parsers,
 };
-
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
@@ -65,6 +64,87 @@ pub async fn get_document(
     };
 
     Ok(Json(db::to_document_info(&doc, pages)))
+}
+
+// ---------------------------------------------------------------------------
+// Document CRUD (rename / soft-delete / restore)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RenameRequest {
+    pub filename: String,
+}
+
+pub async fn rename_document(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RenameRequest>,
+) -> impl IntoResponse {
+    let trimmed = req.filename.trim();
+    if trimmed.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "filename must not be empty"));
+    }
+    if trimmed.chars().count() > 255 {
+        return Err(err(StatusCode::BAD_REQUEST, "filename too long (max 255 chars)"));
+    }
+
+    let mut conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::rename_document(&mut conn, &id, trimmed) {
+        Ok(true) => Ok(Json(serde_json::json!({ "id": id, "filename": trimmed }))),
+        Ok(false) => Err(err(StatusCode::NOT_FOUND, "document not found")),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn soft_delete_document(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::soft_delete_document(&mut conn, &id) {
+        Ok(true) => Ok(Json(serde_json::json!({ "deleted": true, "id": id }))),
+        Ok(false) => Err(err(StatusCode::NOT_FOUND, "document not found")),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn restore_document(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::restore_document(&mut conn, &id) {
+        Ok(true) => Ok(Json(serde_json::json!({ "restored": true, "id": id }))),
+        Ok(false) => Err(err(StatusCode::NOT_FOUND, "document not found")),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn list_trash(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = match state.open() {
+        Ok(c) => c,
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    match db::list_trash_documents(&conn) {
+        Ok(docs) => Ok(Json(docs)),
+        Err(e) => {
+            error!("Failed to list trash: {}", e);
+            Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
 }
 
 pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart) -> impl IntoResponse {
@@ -166,6 +246,7 @@ pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart
         storage_key: storage_key.clone(),
         status: "parsed".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
+        deleted_at: None,
     };
 
     let mut conn = state.open().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

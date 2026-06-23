@@ -40,7 +40,9 @@ impl AppState {
 }
 
 fn open_path(path: &Path) -> anyhow::Result<Connection> {
-    Connection::open(path).context("open sqlite")
+    let conn = Connection::open(path).context("open sqlite")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    Ok(conn)
 }
 
 pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
@@ -133,12 +135,13 @@ pub struct StoredDocument {
     pub storage_key: String,
     pub status: String,
     pub created_at: String,
+    pub deleted_at: Option<String>,
 }
 
 pub fn find_document_by_hash(conn: &Connection, hash: &str) -> anyhow::Result<Option<StoredDocument>> {
     let mut stmt = conn.prepare(
-        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
-         FROM documents WHERE file_hash = ?1",
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at, deleted_at
+         FROM documents WHERE file_hash = ?1 AND deleted_at IS NULL",
     )?;
     let mut rows = stmt.query(params![hash])?;
     if let Some(row) = rows.next()? {
@@ -150,8 +153,8 @@ pub fn find_document_by_hash(conn: &Connection, hash: &str) -> anyhow::Result<Op
 
 pub fn find_document_by_id(conn: &Connection, id: &str) -> anyhow::Result<Option<StoredDocument>> {
     let mut stmt = conn.prepare(
-        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
-         FROM documents WHERE id = ?1",
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at, deleted_at
+         FROM documents WHERE id = ?1 AND deleted_at IS NULL",
     )?;
     let mut rows = stmt.query(params![id])?;
     if let Some(row) = rows.next()? {
@@ -172,17 +175,56 @@ fn map_document(row: &rusqlite::Row) -> rusqlite::Result<StoredDocument> {
         storage_key: row.get(6)?,
         status: row.get(7)?,
         created_at: row.get(8)?,
+        deleted_at: row.get(9)?,
     })
 }
 
 pub fn list_documents(conn: &Connection) -> anyhow::Result<Vec<StoredDocument>> {
     let mut stmt = conn.prepare(
-        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at
-         FROM documents ORDER BY created_at DESC",
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at, deleted_at
+         FROM documents WHERE deleted_at IS NULL ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| map_document(row))?;
     rows.collect::<Result<Vec<_>, _>>()
         .context("collect documents")
+}
+
+pub fn list_trash_documents(conn: &Connection) -> anyhow::Result<Vec<StoredDocument>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at, deleted_at
+         FROM documents WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| map_document(row))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("collect trashed documents")
+}
+
+/// Returns true if a row was updated.
+pub fn rename_document(conn: &mut Connection, id: &str, new_filename: &str) -> anyhow::Result<bool> {
+    let count = conn.execute(
+        "UPDATE documents SET filename = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![new_filename, id],
+    )?;
+    Ok(count > 0)
+}
+
+/// Returns true if a row was soft-deleted.
+pub fn soft_delete_document(conn: &mut Connection, id: &str) -> anyhow::Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let count = conn.execute(
+        "UPDATE documents SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![now, id],
+    )?;
+    Ok(count > 0)
+}
+
+/// Returns true if a row was restored.
+pub fn restore_document(conn: &mut Connection, id: &str) -> anyhow::Result<bool> {
+    let count = conn.execute(
+        "UPDATE documents SET deleted_at = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(count > 0)
 }
 
 pub fn get_pages(conn: &Connection, document_id: &str) -> anyhow::Result<Vec<PageContent>> {
@@ -282,6 +324,9 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
             "ALTER TABLE chunks ADD COLUMN end_char INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    if !has_column(conn, "documents", "deleted_at")? {
+        conn.execute("ALTER TABLE documents ADD COLUMN deleted_at TEXT", [])?;
     }
     Ok(())
 }
@@ -462,4 +507,122 @@ pub fn delete_flashcards_for_document(conn: &mut Connection, document_id: &str) 
         params![document_id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_db() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        // Keep the tempdir alive for the life of the app state by leaking it.
+        std::mem::forget(dir);
+        AppState::new(&db_path).expect("init state")
+    }
+
+    fn seed_doc(state: &AppState) -> String {
+        let mut conn = state.open().unwrap();
+        let doc = StoredDocument {
+            id: uuid::Uuid::new_v4().to_string(),
+            filename: "Test.pdf".to_string(),
+            file_type: "pdf".to_string(),
+            page_count: 1,
+            total_chars: 100,
+            file_hash: uuid::Uuid::new_v4().to_string(),
+            storage_key: "key".to_string(),
+            status: "parsed".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            deleted_at: None,
+        };
+        insert_document(&mut conn, &doc, 42, &[PageContent {
+            page_num: 1,
+            text: "hello world".to_string(),
+            char_offset: 0,
+        }])
+        .unwrap();
+        doc.id
+    }
+
+    #[test]
+    fn rename_updates_filename() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(rename_document(&mut conn, &id, "Renamed.pdf").unwrap());
+        let doc = find_document_by_id(&conn, &id).unwrap().unwrap();
+        assert_eq!(doc.filename, "Renamed.pdf");
+    }
+
+    #[test]
+    fn rename_returns_false_for_missing() {
+        let state = tmp_db();
+        let mut conn = state.open().unwrap();
+        assert!(!rename_document(&mut conn, "does-not-exist", "X.pdf").unwrap());
+    }
+
+    #[test]
+    fn soft_delete_hides_and_trash_lists() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+
+        let conn = state.open().unwrap();
+        // Hidden from active list
+        assert!(list_documents(&conn).unwrap().is_empty());
+        // Not found via find_document_by_id
+        assert!(find_document_by_id(&conn, &id).unwrap().is_none());
+        // Visible in trash
+        let trash = list_trash_documents(&conn).unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].id, id);
+        assert!(trash[0].deleted_at.is_some());
+    }
+
+    #[test]
+    fn soft_delete_twice_returns_false() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+        assert!(!soft_delete_document(&mut conn, &id).unwrap());
+    }
+
+    #[test]
+    fn restore_brings_document_back() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+        assert!(restore_document(&mut conn, &id).unwrap());
+
+        let conn = state.open().unwrap();
+        let active = list_documents(&conn).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id);
+        assert!(active[0].deleted_at.is_none());
+        assert!(list_trash_documents(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_missing_returns_false() {
+        let state = tmp_db();
+        let mut conn = state.open().unwrap();
+        assert!(!restore_document(&mut conn, "nope").unwrap());
+    }
+
+    #[test]
+    fn rename_blocked_while_deleted() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+        assert!(!rename_document(&mut conn, &id, "TryRename.pdf").unwrap());
+    }
 }
