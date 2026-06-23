@@ -322,7 +322,9 @@ pub async fn generate_flashcards(
         return Err(err(StatusCode::BAD_REQUEST, "no pages selected"));
     }
 
-    let chunks = chunker::chunk_document(&document_id, &pages, 256);
+    // Chunk into ~4000-token (~16KB) batches so a 68-page doc becomes
+    // ~8 LLM calls instead of 68, staying well under Groq rate limits.
+    let chunks = chunker::chunk_document(&document_id, &pages, 4000);
     if chunks.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no chunks could be created"));
     }
@@ -380,11 +382,36 @@ async fn generate_task(
     let key_ref = key.as_deref();
 
     let mut all_cards = Vec::new();
+    let mut used_fallback = false;
+    let mut llm_dead = false;
 
     for (idx, chunk) in chunks.iter().enumerate() {
-        let cards = llm::generate_for_chunk(&client, key_ref, chunk, Some(&density))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let cards = if llm_dead {
+            tracing::info!(
+                "LLM disabled for chunk {} (daily limit), using rule-based",
+                chunk.id
+            );
+            used_fallback = true;
+            chunker::generate_flashcards(chunk, Some(&density))
+        } else {
+            match llm::generate_for_chunk(&client, key_ref, chunk, Some(&density)).await {
+                Ok(cards) => cards,
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::warn!(
+                        "LLM failed for chunk {} ({}), falling back to rule-based: {}",
+                        chunk.id,
+                        chunk.content.len(),
+                        msg
+                    );
+                    used_fallback = true;
+                    if msg.contains("Daily rate limit") {
+                        llm_dead = true;
+                    }
+                    chunker::generate_flashcards(chunk, Some(&density))
+                }
+            }
+        };
         all_cards.extend(cards);
 
         let progress = (idx + 1) as i64;
@@ -397,13 +424,20 @@ async fn generate_task(
         }).await??;
     }
 
+    let status = if used_fallback { "completed_fallback" } else { "completed" };
+    let note = if used_fallback {
+        Some("Some cards used rule-based fallback (LLM rate-limited).".to_string())
+    } else {
+        None
+    };
+
     let state_for_insert = Arc::clone(&state);
     let job_id_clone = job_id.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let mut conn = state_for_insert.open()?;
         db::delete_flashcards_for_document(&mut conn, &document_id)?;
         db::insert_flashcards(&mut conn, &all_cards)?;
-        db::set_job_status(&mut conn, &job_id_clone, "completed", None)?;
+        db::set_job_status(&mut conn, &job_id_clone, status, note.as_deref())?;
         Ok(())
     }).await??;
 

@@ -75,7 +75,7 @@ struct LlmCard {
 
 const WORDS_PER_CARD: f64 = 60.0;
 const MIN_CARDS: u32 = 3;
-const MAX_CARDS: u32 = 15;
+const MAX_CARDS: u32 = 30;
 
 fn density_multiplier(density: &str) -> f64 {
     match density.trim().to_lowercase().as_str() {
@@ -95,7 +95,7 @@ fn compute_card_target(word_count: usize, multiplier: f64) -> u32 {
 }
 
 fn max_tokens_for(card_count: u32) -> u32 {
-    (card_count * 160 + 256).clamp(512, 4096)
+    (card_count * 160 + 256).clamp(512, 8192)
 }
 
 fn build_prompt(chunk: &Chunk, card_count: u32) -> String {
@@ -402,6 +402,6 @@ mod tests {
     #[test]
     fn max_tokens_stays_in_bounds() {
         assert!(max_tokens_for(MIN_CARDS) >= 512);
-        assert!(max_tokens_for(MAX_CARDS) <= 4096);
+        assert!(max_tokens_for(MAX_CARDS) <= 8192);
     }
 }
