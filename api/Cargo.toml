@@ -23,3 +23,5 @@ hex = "0.4"
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = "2"
+quick-xml = "0.36"

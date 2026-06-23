@@ -14,6 +14,7 @@ mod md_parser;
 mod models;
 mod parsers;
 mod pdf_parser;
+mod pptx_parser;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/jobs/:id", get(handlers::get_job))
         .route("/trash", get(handlers::list_trash))
         .route("/upload", post(handlers::upload))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(cors)
         .with_state(state);
 

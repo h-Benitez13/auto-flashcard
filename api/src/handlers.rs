@@ -8,7 +8,7 @@ use axum::{
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
-const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
 const ALLOWED_EXTENSIONS: &[&str] = &["pdf", "md", "markdown", "txt", "pptx", "ppt"];
 
 use serde::Deserialize;
