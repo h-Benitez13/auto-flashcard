@@ -17,7 +17,13 @@ shuffle, and review. Reload the page and everything is still there.
   key are skipped.
 - **Document management** — rename documents, soft-delete (move to trash),
   and restore from a collapsible trash section.
-- **Flashcard review** — click to flip, shuffle, and browse by document.
+- **Flashcard study mode** — focused, centered cards. Click a card to flip
+  between question and answer, use Previous/Next buttons, or use keyboard
+  shortcuts: `Space` to flip, `←` / `→` to navigate. Shuffle anytime.
+- **Answer-side source grounding** — when the answer is revealed, the exact
+  source text snippet and page number the LLM used are shown.
+- **Card count badges on the home page** — each document with flashcards
+  shows a card-count badge and a quick **Review** button.
 - **Persistence** — SQLite database + on-disk file storage. Reload the app
   and your documents and flashcards are all restored.
 
