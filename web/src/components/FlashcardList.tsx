@@ -12,11 +12,13 @@ interface Props {
 }
 
 export default function FlashcardList({ cards }: Props) {
-  const [order, setOrder] = useState<number[]>([]);
+  const [order, setOrder] = useState<number[]>(() =>
+    Array.from({ length: cards.length }, (_, i) => i)
+  );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
 
-  // Initialize order when cards change
+  // Sync order when cards change
   useEffect(() => {
     setOrder(Array.from({ length: cards.length }, (_, i) => i));
     setCurrentIdx(0);
@@ -24,6 +26,13 @@ export default function FlashcardList({ cards }: Props) {
   }, [cards.length]);
 
   if (cards.length === 0) {
+    return <p className="text-sm text-muted-foreground">No flashcards yet.</p>;
+  }
+
+  // Guard against empty/missing order during transitions
+  const cardIdx = order[currentIdx];
+  const card = cardIdx !== undefined ? cards[cardIdx] : undefined;
+  if (!card) {
     return <p className="text-sm text-muted-foreground">No flashcards yet.</p>;
   }
 
@@ -69,16 +78,15 @@ export default function FlashcardList({ cards }: Props) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [currentIdx, order.length]);
 
-  const cardIdx = order[currentIdx];
-  const card = cards[cardIdx];
   const progress = currentIdx + 1;
   const total = order.length;
 
   // Truncate preview to ~200 chars
+  const rawPreview = card.source_ref?.preview ?? "";
   const preview =
-    card.source_ref.preview.length > 200
-      ? card.source_ref.preview.substring(0, 200) + "..."
-      : card.source_ref.preview;
+    rawPreview.length > 200
+      ? rawPreview.substring(0, 200) + "..."
+      : rawPreview;
 
   return (
     <div className="flex flex-col items-center justify-center gap-8">
@@ -88,9 +96,9 @@ export default function FlashcardList({ cards }: Props) {
           <Shuffle className="mr-2 size-4" />
           Shuffle
         </Button>
-        <p className="text-sm text-muted-foreground">
+        <div className="text-sm text-muted-foreground">
           {progress} of {total}
-        </p>
+        </div>
       </div>
 
       {/* Centered card */}
@@ -115,29 +123,29 @@ export default function FlashcardList({ cards }: Props) {
           <div>
             {isFlipped ? (
               <>
-                <p className="text-sm text-muted-foreground mb-4">Answer</p>
-                <p className="whitespace-pre-wrap text-xl leading-relaxed">
+                <div className="text-sm text-muted-foreground mb-4">Answer</div>
+                <div className="whitespace-pre-wrap text-xl leading-relaxed">
                   {card.answer}
-                </p>
+                </div>
               </>
             ) : (
               <>
-                <p className="text-sm text-muted-foreground mb-4">Question</p>
-                <p className="text-2xl font-semibold leading-relaxed">
+                <div className="text-sm text-muted-foreground mb-4">Question</div>
+                <div className="text-2xl font-semibold leading-relaxed">
                   {card.question}
-                </p>
+                </div>
               </>
             )}
           </div>
 
           {/* Source snippet footer */}
           <div className="mt-6 border-t bg-slate-50 dark:bg-slate-900 -mx-6 px-6 py-4">
-            <p className="text-xs font-medium text-muted-foreground mb-2">
+            <div className="text-xs font-medium text-muted-foreground mb-2">
               Source
-            </p>
-            <p className="font-mono text-xs text-muted-foreground leading-relaxed">
+            </div>
+            <div className="font-mono text-xs text-muted-foreground leading-relaxed">
               {preview}
-            </p>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -165,7 +173,7 @@ export default function FlashcardList({ cards }: Props) {
       </div>
 
       {/* Keyboard hints */}
-      <p className="text-xs text-muted-foreground text-center">
+      <div className="text-xs text-muted-foreground text-center">
         <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">
           Space
         </kbd>{" "}
@@ -178,7 +186,7 @@ export default function FlashcardList({ cards }: Props) {
           →
         </kbd>{" "}
         to navigate
-      </p>
+      </div>
     </div>
   );
 }
