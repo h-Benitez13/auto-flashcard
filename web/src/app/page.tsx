@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listDocuments, listTrash, uploadFile } from "@/lib/api";
+import { listDocuments, listTrash, uploadFile, getFlashcards } from "@/lib/api";
 import { DocumentInfo } from "@/lib/types";
 import DocumentList from "@/components/DocumentList";
 import TrashList from "@/components/TrashList";
@@ -25,6 +25,7 @@ type DocSummary = Pick<
 export default function Home() {
   const [docs, setDocs] = useState<DocSummary[]>([]);
   const [trash, setTrash] = useState<(DocSummary & { deleted_at?: string | null })[]>([]);
+  const [cardCounts, setCardCounts] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [trashOpen, setTrashOpen] = useState(false);
@@ -37,6 +38,20 @@ export default function Home() {
       ]);
       setDocs(active);
       setTrash(trashed);
+
+      // Fetch card counts for each document
+      const counts: Record<string, number> = {};
+      await Promise.all(
+        active.map(async (doc) => {
+          try {
+            const cards = await getFlashcards(doc.id);
+            counts[doc.id] = cards.length;
+          } catch {
+            counts[doc.id] = 0;
+          }
+        })
+      );
+      setCardCounts(counts);
     } catch {
       setError("Could not load documents");
     }
@@ -78,7 +93,7 @@ export default function Home() {
           <Separator />
           <section>
             <h2 className="mb-4 text-xl font-semibold">Documents</h2>
-            <DocumentList docs={docs} onChanged={load} />
+            <DocumentList docs={docs} cardCounts={cardCounts} onChanged={load} />
           </section>
 
           {trash.length > 0 && (
