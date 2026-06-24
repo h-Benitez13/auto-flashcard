@@ -19,8 +19,7 @@ import {
 } from "@/components/ui/card";
 import FlashcardList from "@/components/FlashcardList";
 
-const DENSITIES = ["concise", "balanced", "comprehensive"] as const;
-type Density = (typeof DENSITIES)[number];
+type Density = "concise" | "balanced" | "comprehensive";
 
 export default function DocumentPage() {
   const { id } = useParams<{ id: string }>();
@@ -33,7 +32,6 @@ export default function DocumentPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setLoading(true);
     Promise.all([getDocument(id), getFlashcards(id)])
       .then(([d, c]) => {
         setDoc(d);
@@ -151,7 +149,7 @@ export default function DocumentPage() {
           {job && job.status === "generating" && (
             <div className="space-y-1">
               <div className="flex justify-between text-sm">
-                <span>Generating…</span>
+                <span>{job.status_message || "Generating…"}</span>
                 <span>
                   {job.progress} / {job.total}
                 </span>
@@ -185,7 +183,7 @@ export default function DocumentPage() {
           <Separator className="my-8" />
           <section>
             <h2 className="mb-4 text-xl font-semibold">Flashcards</h2>
-            <FlashcardList cards={cards} />
+            <FlashcardList key={cards.map((c) => c.id).join(",")} cards={cards} />
           </section>
         </>
       )}

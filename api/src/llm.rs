@@ -416,6 +416,7 @@ fn parse_llm_response(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
                         preview: chunk.content.chars().take(200).collect(),
                     },
                     tags: lc.tags.unwrap_or_default(),
+                    provider: Some("llm".to_string()),
                 })
             })
             .collect();
@@ -544,6 +545,7 @@ fn extract_cards_from_q_a(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
                         preview: chunk.content.chars().take(200).collect(),
                     },
                     tags: vec!["auto-generated".to_string()],
+                    provider: Some("llm".to_string()),
                 });
             }
             current_question.clear();
@@ -709,6 +711,7 @@ mod tests {
                     preview: "source text".to_string(),
                 },
                 tags: vec![],
+                provider: Some("llm".to_string()),
             },
             crate::models::Flashcard {
                 id: "b".to_string(),
@@ -725,6 +728,7 @@ mod tests {
                     preview: "source text".to_string(),
                 },
                 tags: vec![],
+                provider: Some("llm".to_string()),
             },
             crate::models::Flashcard {
                 id: "c".to_string(),
@@ -741,6 +745,7 @@ mod tests {
                     preview: "source text".to_string(),
                 },
                 tags: vec![],
+                provider: Some("llm".to_string()),
             },
         ];
         let filtered = filter_and_deduplicate_cards(cards);
