@@ -39,6 +39,8 @@ pub struct Flashcard {
     pub card_type: String,
     pub source_ref: SourceRef,
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

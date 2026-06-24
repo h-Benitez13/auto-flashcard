@@ -30,6 +30,7 @@ export interface Flashcard {
   card_type: string;
   source_ref: SourceRef;
   tags: string[];
+  provider?: "llm" | "rule-based";
 }
 
 export interface GenerationJob {
@@ -39,6 +40,7 @@ export interface GenerationJob {
   progress: number;
   total: number;
   error_message?: string;
+  status_message?: string;
   density?: string;
   use_llm: boolean;
 }

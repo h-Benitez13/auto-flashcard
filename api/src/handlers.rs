@@ -208,9 +208,17 @@ pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart
         Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     };
 
-    if let Ok(Some(existing)) = db::find_document_by_hash(&conn, &hash) {
-        info!("Duplicate upload, returning existing document {}", existing.id);
-        let pages = db::get_pages(&conn, &existing.id).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Ok(Some(existing)) = db::find_document_by_hash_including_deleted(&conn, &hash) {
+        if existing.deleted_at.is_some() {
+            info!("Restoring deleted document {} for re-upload", existing.id);
+            let mut conn = state.open().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            db::restore_document(&mut conn, &existing.id)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("restore document: {}", e)))?;
+        } else {
+            info!("Duplicate upload, returning existing document {}", existing.id);
+        }
+        let pages = db::get_pages(&conn, &existing.id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         return Ok(Json(db::to_document_info(&existing, pages)));
     }
 
@@ -360,7 +368,7 @@ pub async fn generate_flashcards(
             let job_id2 = job_id.clone();
             let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 let mut conn = state_for_failure.open()?;
-                db::set_job_status(&mut conn, &job_id2, "failed", Some(&msg))?;
+                db::set_job_status(&mut conn, &job_id2, "failed", Some(&msg), Some(&msg))?;
                 Ok(())
             }).await;
         }
@@ -388,16 +396,19 @@ async fn generate_task(
     let mut llm_dead = false;
 
     for (idx, chunk) in chunks.iter().enumerate() {
-        let cards = if llm_dead {
+        let (provider_name, cards) = if llm_dead {
             tracing::info!(
                 "LLM disabled for chunk {} (all providers exhausted), using rule-based",
                 chunk.id
             );
             used_fallback = true;
-            llm::filter_and_deduplicate_cards(chunker::generate_flashcards(chunk, Some(&density)))
+            (
+                "rule-based",
+                llm::filter_and_deduplicate_cards(chunker::generate_flashcards(chunk, Some(&density))),
+            )
         } else {
             match llm::generate_for_chunk(&client, &providers, chunk, Some(&density)).await {
-                Ok(cards) => cards,
+                Ok(cards) => ("llm", cards),
                 Err(e) => {
                     let msg = e.to_string();
                     tracing::warn!(
@@ -411,14 +422,24 @@ async fn generate_task(
                     if msg.contains("Daily rate limit") || msg.contains("All providers failed") {
                         llm_dead = true;
                     }
-                    llm::filter_and_deduplicate_cards(chunker::generate_flashcards(
-                        chunk,
-                        Some(&density),
-                    ))
+                    (
+                        "rule-based",
+                        llm::filter_and_deduplicate_cards(chunker::generate_flashcards(
+                            chunk,
+                            Some(&density),
+                        )),
+                    )
                 }
             }
         };
-        all_cards.extend(cards);
+
+        for card in &cards {
+            // Cards from the rule-based chunker already carry provider="rule-based".
+            // Override here so the job-level provider reflects which path was used.
+            let mut card = card.clone();
+            card.provider = Some(provider_name.to_string());
+            all_cards.push(card);
+        }
 
         // Pace requests to stay under per-minute token quotas (Cerebras
         // reasoning models are token-heavy and hit tokens-per-minute limits).
@@ -427,11 +448,17 @@ async fn generate_task(
         }
 
         let progress = (idx + 1) as i64;
+        let status_message = format!(
+            "Processing chunk {} of {} ({})",
+            progress,
+            chunks.len(),
+            provider_name
+        );
         let job_id_clone = job_id.clone();
         let state_for_progress = Arc::clone(&state);
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut conn = state_for_progress.open()?;
-            db::update_job_progress(&mut conn, &job_id_clone, progress)?;
+            db::update_job_progress_with_status(&mut conn, &job_id_clone, progress, &status_message)?;
             Ok(())
         }).await??;
     }
@@ -442,6 +469,15 @@ async fn generate_task(
     } else {
         None
     };
+    let status_message = if used_fallback {
+        Some(format!(
+            "Completed with {} cards ({} rule-based)",
+            all_cards.len(),
+            all_cards.iter().filter(|c| c.provider.as_deref() == Some("rule-based")).count()
+        ))
+    } else {
+        Some(format!("Completed with {} cards", all_cards.len()))
+    };
 
     let state_for_insert = Arc::clone(&state);
     let job_id_clone = job_id.clone();
@@ -449,7 +485,7 @@ async fn generate_task(
         let mut conn = state_for_insert.open()?;
         db::delete_flashcards_for_document(&mut conn, &document_id)?;
         db::insert_flashcards(&mut conn, &all_cards)?;
-        db::set_job_status(&mut conn, &job_id_clone, status, note.as_deref())?;
+        db::set_job_status(&mut conn, &job_id_clone, status, note.as_deref(), status_message.as_deref())?;
         Ok(())
     }).await??;
 
