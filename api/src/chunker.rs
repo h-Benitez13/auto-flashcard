@@ -211,10 +211,12 @@ fn maybe_list_card(sentence: &str) -> Option<(String, String)> {
         for noun in list_nouns {
             let marker = format!("{} {}", word, noun);
             if lower.contains(&marker) {
-                return Some((
-                    format!("According to the source, what are the {}?", marker),
-                    sentence.to_string(),
-                ));
+                let question = if noun == "main" {
+                    format!("According to the source, what are the {} main things?", word)
+                } else {
+                    format!("According to the source, what are the {} {}?", word, noun)
+                };
+                return Some((question, sentence.to_string()));
             }
         }
     }
@@ -330,5 +332,16 @@ mod tests {
         let (term, def) = extract_definition(sentence).unwrap();
         assert_eq!(term, "Mitochondria");
         assert_eq!(def, "the powerhouse of the cell.");
+    }
+
+    #[test]
+    fn maybe_list_card_generates_grammatical_question() {
+        let sentence = "There are three main causes of the disease.";
+        let (question, _) = maybe_list_card(sentence).unwrap();
+        assert!(question.contains("three main things"), "question was: {}", question);
+
+        let sentence2 = "The four types of tissue are epithelial, connective, muscle, and nervous.";
+        let (question2, _) = maybe_list_card(sentence2).unwrap();
+        assert!(question2.contains("four types"), "question was: {}", question2);
     }
 }
