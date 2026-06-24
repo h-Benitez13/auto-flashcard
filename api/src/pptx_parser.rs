@@ -118,15 +118,22 @@ fn extract_slide_text(xml: &str) -> String {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
-    let mut text_parts: Vec<String> = Vec::new();
+    // Join text runs within a paragraph with spaces, but keep paragraphs
+    // separated by newlines so slide titles/bullets retain their structure.
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current_paragraph_runs: Vec<String> = Vec::new();
     let mut current_run = String::new();
     let mut in_text_run = false;
+    let mut in_paragraph = false;
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                if e.name().as_ref() == b"a:t" {
+                if e.name().as_ref() == b"a:p" {
+                    in_paragraph = true;
+                    current_paragraph_runs.clear();
+                } else if e.name().as_ref() == b"a:t" {
                     in_text_run = true;
                     current_run.clear();
                 }
@@ -142,8 +149,15 @@ fn extract_slide_text(xml: &str) -> String {
                 if e.name().as_ref() == b"a:t" {
                     in_text_run = false;
                     if !current_run.is_empty() {
-                        text_parts.push(current_run.clone());
+                        current_paragraph_runs.push(current_run.clone());
                     }
+                } else if e.name().as_ref() == b"a:p" {
+                    in_paragraph = false;
+                    let para_text = current_paragraph_runs.join(" ").trim().to_string();
+                    if !para_text.is_empty() {
+                        paragraphs.push(para_text);
+                    }
+                    current_paragraph_runs.clear();
                 }
             }
             Ok(Event::Eof) => break,
@@ -153,7 +167,15 @@ fn extract_slide_text(xml: &str) -> String {
         buf.clear();
     }
 
-    text_parts.join(" ")
+    // Flush any paragraph that was not closed.
+    if in_paragraph && !current_paragraph_runs.is_empty() {
+        let para_text = current_paragraph_runs.join(" ").trim().to_string();
+        if !para_text.is_empty() {
+            paragraphs.push(para_text);
+        }
+    }
+
+    paragraphs.join("\n")
 }
 
 fn clean_text(text: &str) -> String {
@@ -177,7 +199,7 @@ mod tests {
             </p:sld>"#;
 
         let text = extract_slide_text(xml);
-        assert_eq!(text, "Hello world Second paragraph.");
+        assert_eq!(text, "Hello world\nSecond paragraph.");
     }
 
     #[test]

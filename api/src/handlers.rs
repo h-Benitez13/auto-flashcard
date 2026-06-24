@@ -302,7 +302,7 @@ pub async fn generate_flashcards(
         Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     };
 
-    let _doc = match db::find_document_by_id(&conn, &document_id) {
+    let doc = match db::find_document_by_id(&conn, &document_id) {
         Ok(Some(d)) => d,
         Ok(None) => return Err(err(StatusCode::NOT_FOUND, "document not found")),
         Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -324,7 +324,12 @@ pub async fn generate_flashcards(
 
     // Chunk into ~4000-token (~16KB) batches so a 68-page doc becomes
     // ~8 LLM calls instead of 68, staying well under Groq rate limits.
-    let chunks = chunker::chunk_document(&document_id, &pages, 4000);
+    // For PowerPoint, keep slides grouped so each chunk is focused.
+    let chunks = if doc.file_type == "pptx" {
+        chunker::chunk_pptx(&document_id, &pages, 3)
+    } else {
+        chunker::chunk_document(&document_id, &pages, 4000)
+    };
     if chunks.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no chunks could be created"));
     }
