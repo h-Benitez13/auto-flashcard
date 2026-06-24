@@ -30,7 +30,12 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
 
 export async function getDocument(id: string): Promise<DocumentInfo> {
   const res = await fetch(`${API_URL}/documents/${id}`);
-  if (!res.ok) throw new Error("Failed to load document");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || "Failed to load document");
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
