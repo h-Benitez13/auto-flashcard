@@ -2,21 +2,40 @@ use crate::models::{Chunk, Flashcard, SourceRef};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-const SYSTEM_PROMPT: &str = r#"You are a flashcard generator. Your ONLY job is to create question-answer pairs DIRECTLY from the provided source text.
+const SYSTEM_PROMPT: &str = r#"You are an expert study-aid creator. Generate flashcards from the provided source text that would actually help a student prepare for an exam.
 
 RULES:
-1. Every answer MUST be completely derivable from the source text alone
-2. Do NOT add outside knowledge, explanations, or inferences
-3. Use the EXACT terminology from the source
-4. Keep answers concise but complete
-5. Each card must test a DISTINCT idea — never repeat or rephrase the same question
-6. Only output a JSON array, nothing else
+1. Generate ONLY from the provided source text. Do NOT add outside knowledge, explanations, or inferences.
+2. Ask varied, exam-style questions: definitions, lists, comparisons, mechanisms/processes, causes/effects, "why"/"how" questions, fill-in-the-blank, and true/false rephrased as questions.
+3. NEVER default to generic "What is {word}?" questions. Use "What is [term]?" ONLY when the source explicitly defines that term. Prefer specific, contextual questions.
+4. Each card must test ONE distinct idea. Never repeat or rephrase the same question.
+5. Use the EXACT terminology from the source.
+6. Keep answers concise but complete, and fully derivable from the source.
+7. Only output a JSON array, nothing else.
 
 OUTPUT FORMAT:
 [
   {
-    "question": "What is [term]?",
-    "answer": "[exact answer from source]",
+    "question": "According to the text, what are the three main components of X?",
+    "answer": "The three main components are A, B, and C.",
+    "card_type": "list",
+    "tags": ["topic"]
+  },
+  {
+    "question": "How does X lead to Y?",
+    "answer": "X causes Y by doing Z.",
+    "card_type": "mechanism",
+    "tags": ["topic"]
+  },
+  {
+    "question": "Compare A and B.",
+    "answer": "A does X, while B does Y.",
+    "card_type": "comparison",
+    "tags": ["topic"]
+  },
+  {
+    "question": "___________ is defined as the process by which plants convert light into energy.",
+    "answer": "Photosynthesis",
     "card_type": "definition",
     "tags": ["topic"]
   }
@@ -30,7 +49,7 @@ const USER_PROMPT_TEMPLATE: &str = r#"SOURCE TEXT (pages {startPage}-{endPage}):
 {chunkText}
 ---
 
-Create up to {cardCount} flashcards from THIS SOURCE ONLY. Cover as many DISTINCT concepts, definitions, facts, processes, comparisons, and values as the text genuinely supports — without repeating, rephrasing, or padding. If the text only supports fewer solid cards, return fewer. Return a JSON array of cards."#;
+Create up to {cardCount} high-quality flashcards from THIS SOURCE ONLY. Focus on concepts, facts, and relationships that could appear on a test. Ask diverse question types and avoid repeating the same phrasing. If the text supports fewer solid cards, return fewer. Return ONLY a JSON array of cards."#;
 
 // ---------------------------------------------------------------------------
 // Provider chain — all providers use the OpenAI-compatible /chat/completions API
@@ -359,10 +378,10 @@ fn parse_llm_response(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
         .trim()
         .trim_matches(|c: char| c == '`' || c == '\n' || c == ' ');
 
-    let json_str = if cleaned.starts_with("json") {
-        cleaned[4..].trim()
-    } else if cleaned.starts_with("JSON") {
-        cleaned[4..].trim()
+    let json_str = if let Some(rest) = cleaned.strip_prefix("json") {
+        rest.trim()
+    } else if let Some(rest) = cleaned.strip_prefix("JSON") {
+        rest.trim()
     } else {
         cleaned
     };
@@ -398,13 +417,14 @@ fn parse_llm_response(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
             })
             .collect();
 
+        let cards = filter_and_deduplicate_cards(cards);
         if !cards.is_empty() {
             return cards;
         }
     }
 
     tracing::warn!("JSON parse failed, trying Q/A format");
-    extract_cards_from_q_a(text, chunk)
+    filter_and_deduplicate_cards(extract_cards_from_q_a(text, chunk))
 }
 
 fn answer_grounded_in_source(answer: &str, source: &str) -> bool {
@@ -431,6 +451,71 @@ fn answer_grounded_in_source(answer: &str, source: &str) -> bool {
 
     let ratio = matched as f64 / answer_words.len() as f64;
     ratio >= 0.5
+}
+
+fn is_low_quality_card(question: &str, answer: &str) -> bool {
+    let q = question.trim();
+    let a = answer.trim();
+
+    if q.is_empty() || a.is_empty() || a.len() < 10 {
+        return true;
+    }
+
+    if q.to_lowercase() == a.to_lowercase() {
+        return true;
+    }
+
+    // Reject generic "What is X?" where X is a single word and the answer
+    // does not begin with that word (i.e. X was likely an arbitrary token).
+    let lower_q = q.to_lowercase();
+    let prefixes = ["what is ", "what are ", "what was ", "what were "];
+    for prefix in prefixes {
+        if let Some(rest) = lower_q.strip_prefix(prefix) {
+            let term = rest
+                .trim_matches(|c: char| c.is_ascii_punctuation())
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if !term.is_empty() && term.split_whitespace().count() == 1 {
+                let lower_a = a.to_lowercase();
+                if !lower_a.starts_with(term) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn normalize_question(question: &str) -> String {
+    question
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn filter_and_deduplicate_cards(cards: Vec<Flashcard>) -> Vec<Flashcard> {
+    let mut seen = std::collections::HashSet::new();
+    cards
+        .into_iter()
+        .filter(|c| {
+            if is_low_quality_card(&c.question, &c.answer) {
+                tracing::warn!("Skipped low-quality card: {:?}", c.question);
+                return false;
+            }
+            let key = normalize_question(&c.question);
+            if key.is_empty() || !seen.insert(key) {
+                tracing::warn!("Skipped duplicate card: {:?}", c.question);
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 fn extract_cards_from_q_a(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
@@ -562,5 +647,40 @@ mod tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].api_key, "spaced-key");
         std::env::remove_var("GROQ_API_KEY");
+    }
+
+    #[test]
+    fn low_quality_filter_rejects_generic_what_is() {
+        // Answer does not begin with the term → arbitrary token.
+        assert!(is_low_quality_card("What is Q4?", "Sales increased in the final quarter."));
+        assert!(is_low_quality_card("What is photosynthesis?", "A process unrelated to the term."));
+    }
+
+    #[test]
+    fn low_quality_filter_accepts_real_definition() {
+        // Answer begins with the term → likely a real definition.
+        assert!(!is_low_quality_card(
+            "What is photosynthesis?",
+            "Photosynthesis is the process by which plants convert light into energy."
+        ));
+    }
+
+    #[test]
+    fn low_quality_filter_rejects_empty_or_trivial() {
+        assert!(is_low_quality_card("What is X?", ""));
+        assert!(is_low_quality_card("What is X?", "short"));
+        assert!(is_low_quality_card("Same text", "Same text"));
+    }
+
+    #[test]
+    fn normalize_question_strips_punctuation_and_case() {
+        assert_eq!(
+            normalize_question("  What is Photosynthesis?! "),
+            "what is photosynthesis"
+        );
+        assert_eq!(
+            normalize_question("Compare A and B:"),
+            "compare a and b"
+        );
     }
 }
