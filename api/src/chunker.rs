@@ -240,6 +240,7 @@ fn make_flashcard(question: String, answer: String, card_type: &str, chunk: &Chu
             preview: chunk.content.chars().take(200).collect(),
         },
         tags: vec!["fallback".to_string()],
+        provider: Some("rule-based".to_string()),
     }
 }
 

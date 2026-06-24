@@ -99,6 +99,7 @@ pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             progress INTEGER NOT NULL DEFAULT 0,
             total INTEGER NOT NULL DEFAULT 0,
             error_message TEXT,
+            status_message TEXT,
             density TEXT,
             use_llm INTEGER NOT NULL DEFAULT 0
         );
@@ -113,7 +114,8 @@ pub fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             answer TEXT NOT NULL,
             card_type TEXT NOT NULL,
             source_ref TEXT NOT NULL,
-            tags TEXT NOT NULL
+            tags TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'llm'
         );
 
         CREATE INDEX IF NOT EXISTS idx_flashcards_document ON flashcards(document_id);
@@ -138,10 +140,11 @@ pub struct StoredDocument {
     pub deleted_at: Option<String>,
 }
 
-pub fn find_document_by_hash(conn: &Connection, hash: &str) -> anyhow::Result<Option<StoredDocument>> {
+/// Look up a document by hash regardless of soft-delete state.
+pub fn find_document_by_hash_including_deleted(conn: &Connection, hash: &str) -> anyhow::Result<Option<StoredDocument>> {
     let mut stmt = conn.prepare(
         "SELECT id, filename, file_type, page_count, total_chars, file_hash, storage_key, status, created_at, deleted_at
-         FROM documents WHERE file_hash = ?1 AND deleted_at IS NULL",
+         FROM documents WHERE file_hash = ?1",
     )?;
     let mut rows = stmt.query(params![hash])?;
     if let Some(row) = rows.next()? {
@@ -328,6 +331,12 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
     if !has_column(conn, "documents", "deleted_at")? {
         conn.execute("ALTER TABLE documents ADD COLUMN deleted_at TEXT", [])?;
     }
+    if !has_column(conn, "flashcards", "provider")? {
+        conn.execute("ALTER TABLE flashcards ADD COLUMN provider TEXT NOT NULL DEFAULT 'llm'", [])?;
+    }
+    if !has_column(conn, "generation_jobs", "status_message")? {
+        conn.execute("ALTER TABLE generation_jobs ADD COLUMN status_message TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -369,9 +378,10 @@ pub fn insert_flashcards(conn: &mut Connection, cards: &[Flashcard]) -> anyhow::
     for card in cards {
         let source_ref = serde_json::to_string(&card.source_ref).context("serialize source_ref")?;
         let tags = serde_json::to_string(&card.tags).context("serialize tags")?;
+        let provider = card.provider.as_deref().unwrap_or("llm");
         tx.execute(
-            "INSERT INTO flashcards (id, document_id, chunk_id, question, answer, card_type, source_ref, tags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO flashcards (id, document_id, chunk_id, question, answer, card_type, source_ref, tags, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 card.id,
                 card.document_id,
@@ -381,6 +391,7 @@ pub fn insert_flashcards(conn: &mut Connection, cards: &[Flashcard]) -> anyhow::
                 card.card_type,
                 source_ref,
                 tags,
+                provider,
             ],
         )
         .context("insert flashcard")?;
@@ -391,7 +402,7 @@ pub fn insert_flashcards(conn: &mut Connection, cards: &[Flashcard]) -> anyhow::
 
 pub fn get_flashcards(conn: &Connection, document_id: &str) -> anyhow::Result<Vec<Flashcard>> {
     let mut stmt = conn.prepare(
-        "SELECT id, document_id, chunk_id, question, answer, card_type, source_ref, tags
+        "SELECT id, document_id, chunk_id, question, answer, card_type, source_ref, tags, provider
          FROM flashcards WHERE document_id = ?1 ORDER BY id"
     )?;
     let rows = stmt.query_map(params![document_id], |row| {
@@ -412,6 +423,7 @@ pub fn get_flashcards(conn: &Connection, document_id: &str) -> anyhow::Result<Ve
                 preview: String::new(),
             }),
             tags: serde_json::from_str(&tags).unwrap_or_default(),
+            provider: row.get(8).ok(),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>()
@@ -430,6 +442,7 @@ pub struct StoredJob {
     pub progress: i64,
     pub total: i64,
     pub error_message: Option<String>,
+    pub status_message: Option<String>,
     pub density: Option<String>,
     pub use_llm: bool,
 }
@@ -460,7 +473,7 @@ pub fn create_job(
 
 pub fn get_job(conn: &Connection, job_id: &str) -> anyhow::Result<Option<StoredJob>> {
     let mut stmt = conn.prepare(
-        "SELECT id, document_id, status, progress, total, error_message, density, use_llm
+        "SELECT id, document_id, status, progress, total, error_message, status_message, density, use_llm
          FROM generation_jobs WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![job_id])?;
@@ -472,18 +485,24 @@ pub fn get_job(conn: &Connection, job_id: &str) -> anyhow::Result<Option<StoredJ
             progress: row.get(3)?,
             total: row.get(4)?,
             error_message: row.get(5)?,
-            density: row.get(6)?,
-            use_llm: row.get::<_, i64>(7)? != 0,
+            status_message: row.get(6)?,
+            density: row.get(7)?,
+            use_llm: row.get::<_, i64>(8)? != 0,
         }))
     } else {
         Ok(None)
     }
 }
 
-pub fn update_job_progress(conn: &mut Connection, job_id: &str, progress: i64) -> anyhow::Result<()> {
+pub fn update_job_progress_with_status(
+    conn: &mut Connection,
+    job_id: &str,
+    progress: i64,
+    status_message: &str,
+) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE generation_jobs SET progress = ?1, status = ?2 WHERE id = ?3",
-        params![progress, "generating", job_id],
+        "UPDATE generation_jobs SET progress = ?1, status = ?2, status_message = ?3 WHERE id = ?4",
+        params![progress, "generating", status_message, job_id],
     )?;
     Ok(())
 }
@@ -493,10 +512,11 @@ pub fn set_job_status(
     job_id: &str,
     status: &str,
     error_message: Option<&str>,
+    status_message: Option<&str>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE generation_jobs SET status = ?1, error_message = ?2 WHERE id = ?3",
-        params![status, error_message, job_id],
+        "UPDATE generation_jobs SET status = ?1, error_message = ?2, status_message = ?3 WHERE id = ?4",
+        params![status, error_message, status_message, job_id],
     )?;
     Ok(())
 }
@@ -624,5 +644,46 @@ mod tests {
         let mut conn = state.open().unwrap();
         assert!(soft_delete_document(&mut conn, &id).unwrap());
         assert!(!rename_document(&mut conn, &id, "TryRename.pdf").unwrap());
+    }
+
+    #[test]
+    fn find_document_by_hash_including_deleted_finds_soft_deleted_doc() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+
+        let conn = state.open().unwrap();
+        let doc = find_document_by_hash_including_deleted(&conn, &doc_hash(&state, &id))
+            .unwrap()
+            .expect("deleted doc should still be findable by hash");
+        assert_eq!(doc.id, id);
+        assert!(doc.deleted_at.is_some());
+    }
+
+    #[test]
+    fn restore_document_makes_hash_reusable_for_upload() {
+        let state = tmp_db();
+        let id = seed_doc(&state);
+        let hash = doc_hash(&state, &id);
+
+        let mut conn = state.open().unwrap();
+        assert!(soft_delete_document(&mut conn, &id).unwrap());
+        assert!(restore_document(&mut conn, &id).unwrap());
+
+        let conn = state.open().unwrap();
+        let active = list_documents(&conn).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].file_hash, hash);
+    }
+
+    fn doc_hash(state: &AppState, id: &str) -> String {
+        let conn = state.open().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT file_hash FROM documents WHERE id = ?1")
+            .unwrap();
+        stmt.query_row([id], |row| row.get::<_, String>(0))
+            .unwrap()
     }
 }
