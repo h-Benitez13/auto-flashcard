@@ -35,26 +35,29 @@ auto-flashcard/
 │   ├── src/             # parser, LLM, DB, routes, chunker
 │   ├── .env.example     # template for API keys
 │   └── Cargo.toml
-├── web/                 # Next.js App Router frontend
-│   ├── src/app/         # pages
-│   ├── src/components/  # UI components (shadcn/ui)
-│   ├── src/lib/         # API client, types, utils
-│   └── package.json
-└── docs/                # Architecture diagrams & plan
-    ├── architecture.html
-    ├── architecture.png
-    └── architecture.md
+├── src/                 # Next.js App Router frontend
+│   ├── app/             # pages
+│   ├── components/      # UI components (shadcn/ui)
+│   ├── hooks/           # TanStack Query hooks
+│   └── lib/             # API client, types, Zustand store
+├── docs/                # Architecture diagrams & plan
+│   ├── architecture.html
+│   ├── architecture.png
+│   └── architecture.md
+├── package.json
+└── README.md
 ```
 
 ## Tech stack
 
 - **Frontend**: Next.js 16 (App Router), Tailwind CSS v4, TypeScript, shadcn/ui.
+- **State management**: TanStack Query v5 (server state) + Zustand (UI state) + Sonner (toasts).
 - **Backend**: Rust + Axum + SQLite (PostgreSQL/S3 later).
 - **Parsing**: Rust PDF/Markdown/PowerPoint extraction ported from the native app.
   Each PowerPoint slide becomes one page.
 - **LLM**: Multi-provider chain — Groq, Cerebras, OpenAI (all server-side,
   keys never sent to the browser).
-- **Progress**: polling (fits Vercel/serverless). Queue added later.
+- **Progress**: adaptive polling with TanStack Query (fits Vercel/serverless). Queue added later.
 
 ## Getting started
 
@@ -90,7 +93,6 @@ generated with the rule-based fallback so Monica always gets something.
 ### 2. Frontend
 
 ```bash
-cd web
 npm install
 npm run dev
 ```
@@ -99,6 +101,21 @@ Runs on `http://localhost:3000` by default.
 
 The frontend expects the API at `http://localhost:3001`. For production, set
 `NEXT_PUBLIC_API_URL` to your deployed backend URL.
+
+### Tests
+
+```bash
+npm test          # run tests once
+npm run test:watch # run tests in watch mode
+```
+
+Uses Vitest + React Testing Library. Tests cover:
+- Zustand store state changes
+- HTTP client error handling
+- TanStack Query data fetching hooks
+- Mutation optimistic updates and cache invalidation
+- Generation job polling behavior
+- FlashcardList component (study/grid modes, navigation, flip)
 
 ## API endpoints
 
@@ -115,6 +132,32 @@ The frontend expects the API at `http://localhost:3001`. For production, set
 | `GET`    | `/documents/:id/flashcards`        | List flashcards for a document     |
 | `GET`    | `/jobs/:id`                        | Poll generation job status         |
 | `GET`    | `/trash`                           | List soft-deleted documents        |
+
+## Frontend architecture
+
+### Three-layer state management
+
+1. **TanStack Query** (server state)
+   - Documents, flashcards, jobs
+   - Handles caching, deduplication, refetching, retries
+   - See `src/hooks/useDocuments.ts`, `src/hooks/useMutations.ts`, `src/hooks/useGenerationJob.ts`
+
+2. **Zustand** (UI state)
+   - View mode (study/grid), grid columns, trash visibility
+   - See `src/lib/store.ts`
+   - Lightweight, no Provider needed, similar mental model to Jotai but less granular
+
+3. **React state** (component-level)
+   - Local form state, animation state
+   - Handled by `useState` in components
+
+### Key frontend patterns
+
+- **Data fetching**: always use a query hook from `src/hooks/useDocuments.ts`
+- **Mutations**: always use a mutation hook from `src/hooks/useMutations.ts`
+- **Polling**: `useGenerationJobPolling` handles adaptive backoff (1s → 2s → 5s → 10s)
+- **Errors**: API errors show Sonner toast notifications via `onError` callbacks
+- **Optimistic updates**: rename/delete update the UI immediately, then sync with server
 
 ## Development notes
 
@@ -221,9 +264,15 @@ cd api && flyctl deploy
 ## Roadmap
 
 - ~~PowerPoint (.pptx) parsing~~ ✅ Done
+- ~~Grid view + provider tracking~~ ✅ Done
 - Flashcard editing, deletion, and manual creation
 - Study/quiz mode with self-scoring and spaced repetition
 - Export to Anki (.apkg), CSV, JSON, printable PDF
 - Page/section selection for targeted generation
 - Auth for Monica (simple password or magic-link cookie)
 - Message queue (Redis/SQS) for large-document processing
+- Card re-upload feature (single card regeneration)
+- Performance monitoring (cache hit rate, request counts, polling intervals)
+- Sentry integration for error logging
+- Offline support (serve stale data when offline)
+- API optimization: include `card_count` in document list response

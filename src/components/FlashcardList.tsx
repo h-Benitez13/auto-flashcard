@@ -1,13 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { Flashcard } from "@/lib/types";
+import { useUiStore } from "@/lib/store";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Shuffle, LayoutGrid, BookOpen, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  Shuffle,
+  LayoutGrid,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 
-interface Props {
+interface FlashcardListProps {
   cards: Flashcard[];
 }
 
@@ -33,92 +45,88 @@ function ProviderBadge({ provider }: { provider?: Flashcard["provider"] }) {
   );
 }
 
-export default function FlashcardList({ cards }: Props) {
-  const [mode, setMode] = useState<ViewMode>("study");
-  const [columns, setColumns] = useState<GridColumns>(1);
-
-  if (cards.length === 0) {
-    return <p className="text-sm text-muted-foreground">No flashcards yet.</p>;
-  }
-
+function ViewControls({
+  viewMode,
+  onViewModeChange,
+  gridColumns,
+  onColumnsChange,
+}: {
+  viewMode: ViewMode;
+  onViewModeChange: (mode: ViewMode) => void;
+  gridColumns: GridColumns;
+  onColumnsChange: (cols: GridColumns) => void;
+}) {
   return (
-    <div className="space-y-6">
-      {/* View mode toggle */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 rounded-md border bg-background p-1">
-          <button
-            onClick={() => setMode("study")}
-            className={`flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-              mode === "study"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted"
-            }`}
-          >
-            <BookOpen className="size-3.5" />
-            Study
-          </button>
-          <button
-            onClick={() => setMode("grid")}
-            className={`flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-              mode === "grid"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted"
-            }`}
-          >
-            <LayoutGrid className="size-3.5" />
-            Grid
-          </button>
-        </div>
-
-        {mode === "grid" && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Columns</span>
-            <div className="flex items-center rounded-md border bg-background p-1">
-              {[1, 2, 3].map((col) => (
-                <button
-                  key={col}
-                  onClick={() => setColumns(col as GridColumns)}
-                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                    columns === col
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  aria-label={`${col} column view`}
-                >
-                  {col}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-2 rounded-md border bg-background p-1">
+        <button
+          onClick={() => onViewModeChange("study")}
+          className={`flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+            viewMode === "study"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted"
+          }`}
+        >
+          <BookOpen className="size-3.5" />
+          Study
+        </button>
+        <button
+          onClick={() => onViewModeChange("grid")}
+          className={`flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+            viewMode === "grid"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted"
+          }`}
+        >
+          <LayoutGrid className="size-3.5" />
+          Grid
+        </button>
       </div>
 
-      {mode === "study" ? (
-        <StudyView cards={cards} />
-      ) : (
-        <GridView cards={cards} columns={columns} />
+      {viewMode === "grid" && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Columns</span>
+          <div className="flex items-center rounded-md border bg-background p-1">
+            {[1, 2, 3].map((col) => (
+              <button
+                key={col}
+                onClick={() => onColumnsChange(col as GridColumns)}
+                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  gridColumns === col
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted"
+                }`}
+                aria-label={`${col} column view`}
+              >
+                {col}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
 function StudyView({ cards }: { cards: Flashcard[] }) {
-  const [order, setOrder] = useState<number[]>(() =>
-    Array.from({ length: cards.length }, (_, i) => i)
-  );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
+  // null means "use original order"; set when user clicks shuffle
+  const [shuffledOrder, setShuffledOrder] = useState<number[] | null>(null);
 
-  const shuffle = () => {
-    const next = [...order];
+  // Derived order: shuffled if user shuffled, otherwise identity order
+  const order = shuffledOrder ?? Array.from({ length: cards.length }, (_, i) => i);
+
+  const shuffle = useCallback(() => {
+    const next = Array.from({ length: cards.length }, (_, i) => i);
     for (let i = next.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [next[i], next[j]] = [next[j], next[i]];
     }
-    setOrder(next);
+    setShuffledOrder(next);
     setCurrentIdx(0);
     setIsFlipped(false);
-  };
+  }, [cards.length]);
 
   const goNext = useCallback(() => {
     if (currentIdx < cards.length - 1) {
@@ -134,6 +142,7 @@ function StudyView({ cards }: { cards: Flashcard[] }) {
     }
   }, [currentIdx]);
 
+  // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === "Space") {
@@ -223,7 +232,12 @@ function StudyView({ cards }: { cards: Flashcard[] }) {
       </Card>
 
       <div className="flex gap-2">
-        <Button variant="outline" size="lg" onClick={goPrev} disabled={currentIdx === 0}>
+        <Button
+          variant="outline"
+          size="lg"
+          onClick={goPrev}
+          disabled={currentIdx === 0}
+        >
           <ChevronLeft className="mr-2 size-5" />
           Previous
         </Button>
@@ -239,17 +253,30 @@ function StudyView({ cards }: { cards: Flashcard[] }) {
       </div>
 
       <div className="text-xs text-muted-foreground text-center">
-        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">Space</kbd> to
-        flip •{" "}
-        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">←</kbd> /{" "}
-        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">→</kbd> to
-        navigate
+        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">
+          Space
+        </kbd>{" "}
+        to flip ·{" "}
+        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">
+          ←
+        </kbd>{" "}
+        /{" "}
+        <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs">
+          →
+        </kbd>{" "}
+        to navigate
       </div>
     </div>
   );
 }
 
-function GridView({ cards, columns }: { cards: Flashcard[]; columns: GridColumns }) {
+const GridView = React.memo(function GridView({
+  cards,
+  columns,
+}: {
+  cards: Flashcard[];
+  columns: GridColumns;
+}) {
   const [flipped, setFlipped] = useState<Record<string, boolean>>({});
 
   const gridClass =
@@ -270,7 +297,9 @@ function GridView({ cards, columns }: { cards: Flashcard[]; columns: GridColumns
           const isFlipped = flipped[card.id] ?? false;
           const rawPreview = card.source_ref?.preview ?? "";
           const preview =
-            rawPreview.length > 200 ? rawPreview.substring(0, 200) + "..." : rawPreview;
+            rawPreview.length > 200
+              ? rawPreview.substring(0, 200) + "..."
+              : rawPreview;
 
           return (
             <Card
@@ -297,7 +326,9 @@ function GridView({ cards, columns }: { cards: Flashcard[]; columns: GridColumns
               <CardContent className="flex flex-1 flex-col justify-between">
                 {isFlipped ? (
                   <>
-                    <div className="text-sm text-muted-foreground mb-2">Answer</div>
+                    <div className="text-sm text-muted-foreground mb-2">
+                      Answer
+                    </div>
                     <div className="whitespace-pre-wrap text-lg leading-relaxed">
                       {card.answer}
                     </div>
@@ -313,7 +344,9 @@ function GridView({ cards, columns }: { cards: Flashcard[]; columns: GridColumns
                   </>
                 ) : (
                   <>
-                    <div className="text-sm text-muted-foreground mb-2">Question</div>
+                    <div className="text-sm text-muted-foreground mb-2">
+                      Question
+                    </div>
                     <div className="text-xl font-semibold leading-relaxed">
                       {card.question}
                     </div>
@@ -331,6 +364,45 @@ function GridView({ cards, columns }: { cards: Flashcard[]; columns: GridColumns
       <div className="text-xs text-muted-foreground text-center">
         Click any card to flip
       </div>
+    </div>
+  );
+});
+
+/**
+ * FlashcardList component
+ *
+ * Manages study/grid views. View mode and grid columns are controlled
+ * by Zustand store (src/lib/store.ts) to persist across pages.
+ */
+export default function FlashcardList({ cards }: FlashcardListProps) {
+  // Use separate selectors to avoid returning a new object every render
+  // Returning a new object would cause an infinite re-render loop in Zustand
+  const viewMode = useUiStore((state) => state.viewMode);
+  const setViewMode = useUiStore((state) => state.setViewMode);
+  const gridColumns = useUiStore((state) => state.gridColumns);
+  const setGridColumns = useUiStore((state) => state.setGridColumns);
+
+  // Memoize cards to prevent unnecessary re-renders of child views
+  const memoizedCards = useMemo(() => cards, [cards]);
+
+  if (cards.length === 0) {
+    return <p className="text-sm text-muted-foreground">No flashcards yet.</p>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <ViewControls
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        gridColumns={gridColumns}
+        onColumnsChange={setGridColumns}
+      />
+      {viewMode === "study" ? (
+        // key forces remount when card count changes, resetting study state
+        <StudyView key={cards.length} cards={memoizedCards} />
+      ) : (
+        <GridView cards={memoizedCards} columns={gridColumns} />
+      )}
     </div>
   );
 }
