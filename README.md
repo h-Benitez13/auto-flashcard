@@ -258,21 +258,74 @@ cd api && flyctl deploy
 - Rotate any LLM keys that were ever pasted in chat/log files and use the new
   keys only as Fly secrets.
 - Do not commit `.env` files.
-- The deployed app has **no authentication**; anyone with the URL can upload and
-  see all documents. Keep the URL private or add a simple password gate later.
+- The deployed app has **no authentication yet**; anyone with the URL can upload and
+  see all documents. Magic-link auth is on the roadmap (Phase 2). Until then, keep
+  the URL private.
 
 ## Roadmap
 
-- ~~PowerPoint (.pptx) parsing~~ ✅ Done
-- ~~Grid view + provider tracking~~ ✅ Done
-- Flashcard editing, deletion, and manual creation
-- Study/quiz mode with self-scoring and spaced repetition
-- Export to Anki (.apkg), CSV, JSON, printable PDF
-- Page/section selection for targeted generation
-- Auth for Monica (simple password or magic-link cookie)
-- Message queue (Redis/SQS) for large-document processing
-- Card re-upload feature (single card regeneration)
-- Performance monitoring (cache hit rate, request counts, polling intervals)
-- Sentry integration for error logging
-- Offline support (serve stale data when offline)
-- API optimization: include `card_count` in document list response
+The current release is a single-user flashcard generator. The path forward turns
+**auto-flashcard** into a personalized, multi-user study platform: every learner
+gets their own documents, decks, and review history, while the core upload →
+generate → review loop stays fast and simple.
+
+Each phase below ships independently and is tracked by a GitHub milestone.
+Spikes produce decision docs before implementation starts so later phases don't
+have to revisit basics.
+
+### ✅ Done
+- PowerPoint (.pptx) parsing — each slide becomes one page
+- Grid view + provider tracking (Groq → Cerebras → OpenAI chain)
+- Soft-delete + trash, document rename, content-hash dedup
+- Answer-side source grounding (snippet + page number)
+- Adaptive polling for generation jobs
+
+### 🔬 Spikes (design before build)
+- [ ] [#4](../../issues/4) — SRS (SM-2) scheduling spec
+- [ ] [#5](../../issues/5) — Deck ↔ document model & upload-to-review flow
+- [ ] [#6](../../issues/6) — Auth integration plan (email, CORS, CSRF)
+- [ ] [#7](../../issues/7) — SQLite → PostgreSQL scaling thresholds
+
+### Phase 0 — Prep
+- [ ] [#8](../../issues/8) — `users` table + `documents.user_id` migration + backfill
+- [ ] [#9](../../issues/9) — Credentialed CORS + CSRF protection
+- [ ] [#10](../../issues/10) — API client 401 handler stub
+
+### Phase 1 — Card lifecycle
+- [ ] [#11](../../issues/11) — Card CRUD backend (create, update, soft-delete, tags, flags)
+- [ ] [#12](../../issues/12) — CardEditor UI (edit, delete-with-undo, flag, shortcuts)
+- [ ] [#13](../../issues/13) — Single-card regenerate (accept/keep-both diff)
+- [ ] [#14](../../issues/14) — Card lifecycle tests
+
+### Phase 2 — Auth & per-user isolation
+- [ ] [#15](../../issues/15) — Magic-link auth backend
+- [ ] [#16](../../issues/16) — Login page + `useUser` hook + 401 redirect
+- [ ] [#17](../../issues/17) — User-scope all document/card queries
+- [ ] [#18](../../issues/18) — Auth + isolation tests
+
+### Phase 3 — Decks & targeted generation
+- [ ] [#19](../../issues/19) — Deck CRUD backend + `deck_cards` junction
+- [ ] [#20](../../issues/20) — Decks page + `DeckList` + home integration
+- [ ] [#21](../../issues/21) — Page/section selection for generation
+
+### Phase 4 — Spaced repetition
+- [ ] [#22](../../issues/22) — SM-2-lite scheduling module
+- [ ] [#23](../../issues/23) — `card_reviews` table + due-cards query
+- [ ] [#24](../../issues/24) — Review session UI + `ReviewStats`
+- [ ] [#25](../../issues/25) — Leech detection + reset deck
+- [ ] [#26](../../issues/26) — SRS tests
+
+### Phase 5 — Portability
+- [ ] [#27](../../issues/27) — CSV + JSON export
+- [ ] [#28](../../issues/28) — Anki `.apkg` export (media + scheduling)
+- [ ] [#29](../../issues/29) — CSV + JSON import
+
+### Phase 6 — Shareability & polish
+- [ ] [#30](../../issues/30) — Public read-only deck links + fork
+- [ ] [#31](../../issues/31) — Per-user LLM spend caps
+- [ ] [#32](../../issues/32) — Sentry + `/metrics`
+- [ ] [#33](../../issues/33) — PWA + offline review sync
+- [ ] [#34](../../issues/34) — Message queue for large documents
+- [ ] [#35](../../issues/35) — `card_count` + `due_count` in list responses
+
+See the [open issues board](../../issues) for current priorities.
