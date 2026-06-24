@@ -2,9 +2,12 @@
 name: Spike / Design
 about: Research or architecture decision before implementation
 title: "[spike] Decision to make"
-labels: ["spike", "P0"]
+labels: ["spike"]
 assignees: []
 ---
+
+## Priority
+Spikes are typically **P0** (block implementation). Set the final value on the [auto-flashcard Project board](https://github.com/users/h-Benitez13/projects?query=is%3Aopen) using the `Priority` field (P0–P3), not labels.
 
 ## Summary
 What decision needs to be made before implementation can start?

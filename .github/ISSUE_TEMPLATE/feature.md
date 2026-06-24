@@ -2,9 +2,12 @@
 name: Feature
 about: New functionality for auto-flashcard
 title: "[area] Brief feature description"
-labels: ["P2"]
+labels: ["enhancement"]
 assignees: []
 ---
+
+## Priority
+Set on the [auto-flashcard Project board](https://github.com/users/h-Benitez13/projects?query=is%3Aopen) using the `Priority` field (P0–P3), not labels.
 
 ## Summary
 What should this feature do and why?

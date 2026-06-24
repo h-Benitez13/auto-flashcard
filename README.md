@@ -165,6 +165,8 @@ Uses Vitest + React Testing Library. Tests cover:
   use a persistent volume (Render/Railway/Fly) or migrate to Postgres + S3.
 - LLM keys live only in `api/.env` (gitignored). Never commit secrets.
 - See `docs/architecture.md` for the full architecture plan and data model.
+- Branches: `<type>/<issue#>-short-slug` (e.g. `feat/11-card-crud`). PR bodies should say
+  `Closes #N` so merging moves the linked issue to **Done** on the Project board.
 - Tests: `cd api && cargo test` (33 tests).
 
 ## Deployment
@@ -328,4 +330,4 @@ have to revisit basics.
 - [ ] [#34](../../issues/34) — Message queue for large documents
 - [ ] [#35](../../issues/35) — `card_count` + `due_count` in list responses
 
-See the [open issues board](../../issues) for current priorities.
+See the [auto-flashcard Project board](https://github.com/users/h-Benitez13/projects?query=is%3Aopen) for the live view (status, priority, assignee, roadmap). The [open issues list](../../issues) is the raw backlog.
