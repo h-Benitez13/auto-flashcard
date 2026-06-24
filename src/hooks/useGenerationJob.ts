@@ -63,6 +63,12 @@ export function useGenerationJobPolling({
   const lastProgressRef = useRef<number>(0);
   const stallCountRef = useRef<number>(0);
 
+  // Keep a stable reference to onCompleted
+  const onCompletedRef = useRef(onCompleted);
+  useEffect(() => {
+    onCompletedRef.current = onCompleted;
+  }, [onCompleted]);
+
   /**
    * Adaptive polling logic:
    * - If progress changed -> reset interval to 1s
@@ -88,9 +94,9 @@ export function useGenerationJobPolling({
       if (
         (job.status === "completed" ||
           job.status === "completed_fallback") &&
-        onCompleted
+        onCompletedRef.current
       ) {
-        onCompleted();
+        onCompletedRef.current();
 
         // Refetch flashcards since generation is done
         queryClient.invalidateQueries({
@@ -100,7 +106,8 @@ export function useGenerationJobPolling({
 
       if (job.status === "failed") {
         toast.error(
-          `Generation failed: ${job.error_message || "Unknown error"}`
+          `Generation failed: ${job.error_message || "Unknown error"}`,
+          { id: `job-error-${jobId}` } // Prevent toast spam
         );
       }
 
@@ -145,7 +152,7 @@ export function useGenerationJobPolling({
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [job, jobId, docId, queryClient, onCompleted, refetch, maxDurationMs]);
+  }, [job, jobId, docId, queryClient, refetch, maxDurationMs]);
 
   return { data: job, isLoading, refetch };
 }
