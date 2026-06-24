@@ -328,7 +328,10 @@ pub async fn generate_for_chunk(
     let density = density.unwrap_or("balanced");
 
     if providers.is_empty() {
-        return Ok(crate::chunker::generate_flashcards(chunk, Some(density)));
+        return Ok(filter_and_deduplicate_cards(crate::chunker::generate_flashcards(
+            chunk,
+            Some(density),
+        )));
     }
 
     let multiplier = density_multiplier(density);
@@ -421,6 +424,9 @@ fn parse_llm_response(text: &str, chunk: &Chunk) -> Vec<Flashcard> {
         if !cards.is_empty() {
             return cards;
         }
+        // JSON parsed but every card was filtered out (low quality / duplicate).
+        tracing::warn!("All LLM cards filtered out (low quality or duplicates)");
+        return Vec::new();
     }
 
     tracing::warn!("JSON parse failed, trying Q/A format");
@@ -457,7 +463,7 @@ fn is_low_quality_card(question: &str, answer: &str) -> bool {
     let q = question.trim();
     let a = answer.trim();
 
-    if q.is_empty() || a.is_empty() || a.len() < 10 {
+    if q.is_empty() || a.is_empty() {
         return true;
     }
 
@@ -465,24 +471,11 @@ fn is_low_quality_card(question: &str, answer: &str) -> bool {
         return true;
     }
 
-    // Reject generic "What is X?" where X is a single word and the answer
-    // does not begin with that word (i.e. X was likely an arbitrary token).
-    let lower_q = q.to_lowercase();
-    let prefixes = ["what is ", "what are ", "what was ", "what were "];
-    for prefix in prefixes {
-        if let Some(rest) = lower_q.strip_prefix(prefix) {
-            let term = rest
-                .trim_matches(|c: char| c.is_ascii_punctuation())
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            if !term.is_empty() && term.split_whitespace().count() == 1 {
-                let lower_a = a.to_lowercase();
-                if !lower_a.starts_with(term) {
-                    return true;
-                }
-            }
-        }
+    // Fill-in-the-blank cards intentionally have short term answers (e.g. "ATP",
+    // "Mitochondria"). Only enforce a tiny minimum for non-blank answers.
+    let is_fill_in_blank = q.contains("___");
+    if !is_fill_in_blank && a.len() < 3 {
+        return true;
     }
 
     false
@@ -499,7 +492,7 @@ fn normalize_question(question: &str) -> String {
         .join(" ")
 }
 
-fn filter_and_deduplicate_cards(cards: Vec<Flashcard>) -> Vec<Flashcard> {
+pub fn filter_and_deduplicate_cards(cards: Vec<Flashcard>) -> Vec<Flashcard> {
     let mut seen = std::collections::HashSet::new();
     cards
         .into_iter()
@@ -650,26 +643,33 @@ mod tests {
     }
 
     #[test]
-    fn low_quality_filter_rejects_generic_what_is() {
-        // Answer does not begin with the term → arbitrary token.
-        assert!(is_low_quality_card("What is Q4?", "Sales increased in the final quarter."));
-        assert!(is_low_quality_card("What is photosynthesis?", "A process unrelated to the term."));
+    fn low_quality_filter_rejects_empty_or_duplicate() {
+        assert!(is_low_quality_card("What is X?", ""));
+        assert!(is_low_quality_card("Same text", "Same text"));
     }
 
     #[test]
-    fn low_quality_filter_accepts_real_definition() {
-        // Answer begins with the term → likely a real definition.
+    fn low_quality_filter_accepts_real_definition_not_starting_with_term() {
+        // A valid definition often restates the concept without literally
+        // starting with the term.
         assert!(!is_low_quality_card(
             "What is photosynthesis?",
-            "Photosynthesis is the process by which plants convert light into energy."
+            "The process by which plants convert light into energy."
         ));
     }
 
     #[test]
-    fn low_quality_filter_rejects_empty_or_trivial() {
-        assert!(is_low_quality_card("What is X?", ""));
-        assert!(is_low_quality_card("What is X?", "short"));
-        assert!(is_low_quality_card("Same text", "Same text"));
+    fn low_quality_filter_accepts_short_term_answers() {
+        // Fill-in-the-blank and short-definition answers should survive.
+        assert!(!is_low_quality_card("What is RNA?", "Ribonucleic acid."));
+        assert!(!is_low_quality_card(
+            "___________ is the powerhouse of the cell.",
+            "Mitochondria"
+        ));
+        assert!(!is_low_quality_card(
+            "What is the mitochondria?",
+            "Powerhouse of the cell."
+        ));
     }
 
     #[test]
@@ -678,9 +678,73 @@ mod tests {
             normalize_question("  What is Photosynthesis?! "),
             "what is photosynthesis"
         );
-        assert_eq!(
-            normalize_question("Compare A and B:"),
-            "compare a and b"
-        );
+        assert_eq!(normalize_question("Compare A and B:"), "compare a and b");
+    }
+
+    #[test]
+    fn filter_and_deduplicate_keeps_first_drops_duplicates_and_low_quality() {
+        let _chunk = crate::models::Chunk {
+            id: "chunk-1".to_string(),
+            document_id: "doc-1".to_string(),
+            content: "source text".to_string(),
+            token_count: 2,
+            start_page: 1,
+            end_page: 1,
+            start_char: 0,
+            end_char: 11,
+        };
+        let cards = vec![
+            crate::models::Flashcard {
+                id: "a".to_string(),
+                document_id: "doc-1".to_string(),
+                chunk_id: "chunk-1".to_string(),
+                question: "What is X?".to_string(),
+                answer: "X is a thing.".to_string(),
+                card_type: "definition".to_string(),
+                source_ref: crate::models::SourceRef {
+                    page_start: 1,
+                    page_end: 1,
+                    char_start: 0,
+                    char_end: 11,
+                    preview: "source text".to_string(),
+                },
+                tags: vec![],
+            },
+            crate::models::Flashcard {
+                id: "b".to_string(),
+                document_id: "doc-1".to_string(),
+                chunk_id: "chunk-1".to_string(),
+                question: "What is x?".to_string(),
+                answer: "Y is a thing.".to_string(),
+                card_type: "definition".to_string(),
+                source_ref: crate::models::SourceRef {
+                    page_start: 1,
+                    page_end: 1,
+                    char_start: 0,
+                    char_end: 11,
+                    preview: "source text".to_string(),
+                },
+                tags: vec![],
+            },
+            crate::models::Flashcard {
+                id: "c".to_string(),
+                document_id: "doc-1".to_string(),
+                chunk_id: "chunk-1".to_string(),
+                question: "".to_string(),
+                answer: "bad".to_string(),
+                card_type: "definition".to_string(),
+                source_ref: crate::models::SourceRef {
+                    page_start: 1,
+                    page_end: 1,
+                    char_start: 0,
+                    char_end: 11,
+                    preview: "source text".to_string(),
+                },
+                tags: vec![],
+            },
+        ];
+        let filtered = filter_and_deduplicate_cards(cards);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "a");
     }
 }

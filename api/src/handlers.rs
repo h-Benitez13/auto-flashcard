@@ -394,7 +394,7 @@ async fn generate_task(
                 chunk.id
             );
             used_fallback = true;
-            chunker::generate_flashcards(chunk, Some(&density))
+            llm::filter_and_deduplicate_cards(chunker::generate_flashcards(chunk, Some(&density)))
         } else {
             match llm::generate_for_chunk(&client, &providers, chunk, Some(&density)).await {
                 Ok(cards) => cards,
@@ -411,7 +411,10 @@ async fn generate_task(
                     if msg.contains("Daily rate limit") || msg.contains("All providers failed") {
                         llm_dead = true;
                     }
-                    chunker::generate_flashcards(chunk, Some(&density))
+                    llm::filter_and_deduplicate_cards(chunker::generate_flashcards(
+                        chunk,
+                        Some(&density),
+                    ))
                 }
             }
         };
