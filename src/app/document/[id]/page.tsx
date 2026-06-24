@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, FileText, Loader2 } from "lucide-react";
+import { ArrowLeft, FileText, Loader2, AlertTriangle } from "lucide-react";
 
 import { getDocument, generateFlashcards, getJob, getFlashcards } from "@/lib/api";
 import { DocumentInfo, Flashcard, GenerationJob } from "@/lib/types";
@@ -30,6 +30,7 @@ export default function DocumentPage() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
+  const [isDeleted, setIsDeleted] = useState(false);
 
   useEffect(() => {
     Promise.all([getDocument(id), getFlashcards(id)])
@@ -37,7 +38,12 @@ export default function DocumentPage() {
         setDoc(d);
         setCards(c);
       })
-      .catch(() => setError("Could not load document"))
+      .catch((e) => {
+        if (typeof e === "object" && e !== null && "status" in e && e.status === 404) {
+          setIsDeleted(true);
+        }
+        setError(e instanceof Error ? e.message : "Could not load document");
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -77,6 +83,22 @@ export default function DocumentPage() {
   };
 
   if (loading) return <p className="p-8">Loading…</p>;
+  if (isDeleted) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col items-center justify-center p-8 text-center">
+        <div className="mb-4 rounded-full bg-amber-100 p-4 dark:bg-amber-900">
+          <AlertTriangle className="size-8 text-amber-600 dark:text-amber-400" />
+        </div>
+        <h1 className="mb-2 text-2xl font-semibold">Document deleted</h1>
+        <p className="mb-6 max-w-md text-muted-foreground">
+          This document has been moved to trash or permanently removed.
+        </p>
+        <Button asChild>
+          <Link href="/">Back to documents</Link>
+        </Button>
+      </main>
+    );
+  }
   if (error) return <p className="p-8 text-destructive">{error}</p>;
   if (!doc) return null;
 
