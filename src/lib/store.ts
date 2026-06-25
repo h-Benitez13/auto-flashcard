@@ -180,9 +180,12 @@ export const useUiStore = create<UiState>((set) => ({
  *   const { viewMode, setViewMode } = useUiStore();
  *   // This subscribes to entire store, not just viewMode
  *
- * TIP: Always use inline selectors:
- *   const viewMode = useUiStore((state) => state.viewMode);
- *   const setViewMode = useUiStore((state) => state.setViewMode);
+ * ALSO WRONG (returns a new object every render, crashes with:
+ *   "The result of getServerSnapshot should be cached to avoid an infinite loop"):
+ *   const { viewMode, setViewMode } = useUiStore((state) => ({ viewMode, setViewMode }));
+ *
+ * TIP: Always use separate primitive selectors. If you must return an object,
+ *      wrap it with `useShallow` from "zustand/react/shallow".
  */
 
 /**

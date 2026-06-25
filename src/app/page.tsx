@@ -26,10 +26,11 @@ export default function Home() {
   const { mutate: upload, isPending: uploading } = useMutateUpload();
 
   // UI state managed by Zustand
-  const { isTrashOpen, toggleTrash } = useUiStore((state) => ({
-    isTrashOpen: state.isTrashOpen,
-    toggleTrash: state.toggleTrash,
-  }));
+  // Use separate primitive selectors: returning a new object from the
+  // selector breaks useSyncExternalStore's snapshot contract and throws
+  // "getServerSnapshot should be cached to avoid an infinite loop" (React #185).
+  const isTrashOpen = useUiStore((state) => state.isTrashOpen);
+  const toggleTrash = useUiStore((state) => state.toggleTrash);
 
   // Local error state for validation before upload
   const [error, setError] = useState("");
