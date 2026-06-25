@@ -1,0 +1,29 @@
+name: Lint Zustand selectors
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  zustand-selector-check:
+    name: Check for unstable Zustand selectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on object-returning useUiStore selectors
+        run: |
+          # Selectors that return a new object literal (e.g. (state) => ({ ... }))
+          # break useSyncExternalStore's snapshot contract and crash the app on load.
+          # Only search .ts/.tsx source files; ignore doc-comment lines.
+          matches=$(grep -RinE "useUiStore\s*\(\s*(state|s)\s*\)\s*=>\s*\(\{" src/ \
+                    | grep -vE "^\s*(//|\*)" \
+                    || true)
+          if [ -n "$matches" ]; then
+            echo "ERROR: Unstable Zustand selectors detected:"
+            echo "$matches"
+            echo "Use separate primitive selectors, or wrap with useShallow."
+            exit 1
+          fi
+          echo "OK: No unstable Zustand selectors found."

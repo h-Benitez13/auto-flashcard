@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, FileText, Loader2, AlertTriangle } from "lucide-react";
 
-import { getDocument, generateFlashcards, getJob, getFlashcards } from "@/lib/api";
-import { DocumentInfo, Flashcard, GenerationJob } from "@/lib/types";
+import {
+  useDocument,
+  useFlashcards,
+} from "@/hooks/useDocuments";
+import { useMutateGenerate } from "@/hooks/useMutations";
+import { useGenerationJobPolling } from "@/hooks/useGenerationJob";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -17,73 +21,65 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import FlashcardList from "@/components/FlashcardList";
 
 type Density = "concise" | "balanced" | "comprehensive";
 
 export default function DocumentPage() {
   const { id } = useParams<{ id: string }>();
-  const [doc, setDoc] = useState<DocumentInfo | null>(null);
-  const [cards, setCards] = useState<Flashcard[]>([]);
-  const [job, setJob] = useState<GenerationJob | null>(null);
+
+  // Server state from TanStack Query
+  const {
+    data: doc,
+    isLoading: docLoading,
+    error: docError,
+  } = useDocument(id);
+  const { data: cards = [], refetch: refetchCards } = useFlashcards(id);
+
+  // Local state for generation
   const [density, setDensity] = useState<Density>("balanced");
-  const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState("");
-  const [isDeleted, setIsDeleted] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
 
-  useEffect(() => {
-    Promise.all([getDocument(id), getFlashcards(id)])
-      .then(([d, c]) => {
-        setDoc(d);
-        setCards(c);
-      })
-      .catch((e) => {
-        if (typeof e === "object" && e !== null && "status" in e && e.status === 404) {
-          setIsDeleted(true);
-        }
-        setError(e instanceof Error ? e.message : "Could not load document");
-      })
-      .finally(() => setLoading(false));
-  }, [id]);
+  const { mutate: generate, isPending: generating } = useMutateGenerate();
 
-  const isDone = job && (job.status === "completed" || job.status === "completed_fallback");
+  // Smart polling for generation job
+  // - Stops automatically when job completes or fails
+  // - Adaptive backoff: 1s -> 2s -> 5s -> 10s
+  // - Max 1 hour polling duration
+  // - Auto-refetches flashcards on completion
+  const { data: job } = useGenerationJobPolling({
+    docId: id,
+    jobId: jobId || "",
+    onCompleted: () => {
+      refetchCards();
+    },
+  });
 
-  useEffect(() => {
-    if (!job || isDone || job.status === "failed") return;
-
-    const interval = setInterval(async () => {
-      try {
-        const updated = await getJob(job.id);
-        setJob(updated);
-        if (updated.status === "completed" || updated.status === "completed_fallback") {
-          const fresh = await getFlashcards(id);
-          setCards(fresh);
-        }
-      } catch {
-        // ignore polling errors
+  const handleGenerate = () => {
+    generate(
+      { docId: id, density },
+      {
+        onSuccess: (result) => {
+          setJobId(result.jobId);
+        },
       }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [job, id, isDone]);
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setError("");
-    try {
-      const { job_id } = await generateFlashcards(id, { density });
-      const started = await getJob(job_id);
-      setJob(started);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Generation failed");
-    } finally {
-      setGenerating(false);
-    }
+    );
   };
 
-  if (loading) return <p className="p-8">Loading…</p>;
-  if (isDeleted) {
+  // Loading state
+  if (docLoading) {
+    return (
+      <main className="mx-auto w-full max-w-4xl p-8 space-y-6">
+        <Skeleton className="h-10 w-32" />
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </main>
+    );
+  }
+
+  // Deleted document state (404)
+  if (docError && "status" in docError && docError.status === 404) {
     return (
       <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col items-center justify-center p-8 text-center">
         <div className="mb-4 rounded-full bg-amber-100 p-4 dark:bg-amber-900">
@@ -99,9 +95,21 @@ export default function DocumentPage() {
       </main>
     );
   }
-  if (error) return <p className="p-8 text-destructive">{error}</p>;
+
+  // Generic error state
+  if (docError) {
+    return (
+      <p className="p-8 text-destructive">
+        {docError instanceof Error
+          ? docError.message
+          : "Could not load document"}
+      </p>
+    );
+  }
+
   if (!doc) return null;
 
+  const isGenerating = job?.status === "generating";
   const progressPercent =
     job && job.total > 0 ? Math.round((job.progress / job.total) * 100) : 0;
 
@@ -157,8 +165,8 @@ export default function DocumentPage() {
             </select>
           </div>
 
-          <Button onClick={handleGenerate} disabled={generating || !!job && job.status === "generating"}>
-            {generating || (job && job.status === "generating") ? (
+          <Button onClick={handleGenerate} disabled={generating || isGenerating}>
+            {generating || isGenerating ? (
               <>
                 <Loader2 className="mr-2 size-4 animate-spin" />
                 Generating…
@@ -168,12 +176,12 @@ export default function DocumentPage() {
             )}
           </Button>
 
-          {job && job.status === "generating" && (
+          {isGenerating && (
             <div className="space-y-1">
               <div className="flex justify-between text-sm">
-                <span>{job.status_message || "Generating…"}</span>
+                <span>{job?.status_message || "Generating…"}</span>
                 <span>
-                  {job.progress} / {job.total}
+                  {job?.progress} / {job?.total}
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-secondary">
@@ -205,7 +213,7 @@ export default function DocumentPage() {
           <Separator className="my-8" />
           <section>
             <h2 className="mb-4 text-xl font-semibold">Flashcards</h2>
-            <FlashcardList key={cards.map((c) => c.id).join(",")} cards={cards} />
+            <FlashcardList cards={cards} />
           </section>
         </>
       )}

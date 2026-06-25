@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Legacy web directory build artifacts (removed in PR #2)
+    "web/**",
   ]),
 ]);
 
